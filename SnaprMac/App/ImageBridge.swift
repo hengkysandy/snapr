@@ -39,6 +39,25 @@ enum ImageBridge {
         return PixelBuffer(width: w, height: h, rgba: bytes)
     }
 
+    /// The other direction, for the one thing that builds an image out of
+    /// nothing: a scroll capture, whose result is taller than any frame that
+    /// was ever on the screen.
+    static func cgImage(from buffer: PixelBuffer) -> CGImage? {
+        let w = buffer.width, h = buffer.height
+        guard w > 0, h > 0, buffer.rgba.count >= w * h * 4 else { return nil }
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        guard let provider = CGDataProvider(data: Data(buffer.rgba) as CFData) else { return nil }
+        return CGImage(width: w, height: h,
+                       bitsPerComponent: 8, bitsPerPixel: 32,
+                       bytesPerRow: w * 4,
+                       space: space,
+                       bitmapInfo: CGBitmapInfo(rawValue:
+                           CGImageAlphaInfo.premultipliedLast.rawValue
+                           | CGBitmapInfo.byteOrder32Big.rawValue),
+                       provider: provider, decode: nil,
+                       shouldInterpolate: false, intent: .defaultIntent)
+    }
+
     static func pngData(from image: CGImage) -> Data? {
         let out = NSMutableData()
         guard let dest = CGImageDestinationCreateWithData(

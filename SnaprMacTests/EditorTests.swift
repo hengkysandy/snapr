@@ -337,7 +337,7 @@ final class EditorTests: XCTestCase {
         for kind in Annotation.Kind.allCases {
             XCTAssertEqual(EditorTool.forKey(kind.shortcut), .annotate(kind))
         }
-        XCTAssertEqual(EditorTool.forKey("c"), .crop)
+        XCTAssertEqual(EditorTool.forKey("x"), .crop)
         XCTAssertEqual(EditorTool.forKey("v"), .select)
         XCTAssertNil(EditorTool.forKey("q"))
     }
@@ -371,5 +371,565 @@ final class EditorTests: XCTestCase {
                        "the highlight washed out the dark pixels under it")
         let lit = try colour(flat, 30, 20)
         XCTAssertLessThan(lit.b, 200, "the highlight did not tint the light pixels")
+    }
+
+    // MARK: - Editing an annotation that already exists
+    //
+    // Before this, the colour and width controls only affected the NEXT shape.
+    // Drawing a box in the wrong colour meant undoing it and drawing it again.
+
+    /// Draw a box and leave it selected, which is what a real drag does.
+    private func drawSelectedBox(on view: EditorCanvasView,
+                                 from: PixelPoint = PixelPoint(x: 20, y: 20),
+                                 to: PixelPoint = PixelPoint(x: 120, y: 90)) {
+        view.tool = .annotate(.box)
+        view.beginDrag(at: from)
+        view.continueDrag(to: to)
+        view.endDrag(at: to)
+    }
+
+    func testColourAppliesToTheSelectedAnnotation() throws {
+        let view = canvas(try solidWhite(200, 150))
+        drawSelectedBox(on: view)
+        XCTAssertEqual(view.annotations.count, 1)
+        XCTAssertEqual(view.annotations[0].colour, SRGB(r: 255, g: 0, b: 0))
+
+        view.applyColour(SRGB(r: 0, g: 0, b: 255))
+
+        XCTAssertEqual(view.annotations[0].colour, SRGB(r: 0, g: 0, b: 255),
+                       "the colour well did not reach the selected box")
+        // And it became the default too, so the next box matches what the user
+        // is looking at rather than reverting to the old colour.
+        XCTAssertEqual(view.colour, SRGB(r: 0, g: 0, b: 255))
+    }
+
+    func testRecolouringIsOneUndoStepAndRestoresTheOldColour() throws {
+        let view = canvas(try solidWhite(200, 150))
+        drawSelectedBox(on: view)
+        view.applyColour(SRGB(r: 0, g: 0, b: 255))
+
+        view.undo()
+        XCTAssertEqual(view.annotations.count, 1, "undo removed the box, not the recolour")
+        XCTAssertEqual(view.annotations[0].colour, SRGB(r: 255, g: 0, b: 0))
+    }
+
+    func testStyleChangesWithNothingSelectedOnlySetTheDefault() throws {
+        let view = canvas(try solidWhite(200, 150))
+        view.applyColour(SRGB(r: 0, g: 200, b: 0))
+        view.applySize(11, phase: .single)
+        view.applyFillStyle(.filled)
+
+        XCTAssertEqual(view.colour, SRGB(r: 0, g: 200, b: 0))
+        XCTAssertEqual(view.lineWidth, 11)
+        XCTAssertEqual(view.fillStyle, .filled)
+        // Nothing changed on the canvas, so nothing may be undoable. An undo
+        // step that removes nothing is a Cmd+Z that appears to do nothing.
+        XCTAssertFalse(view.canUndo, "changing a default left an undo step behind")
+    }
+
+    func testAWholeSliderDragIsOneUndoStep() throws {
+        let view = canvas(try solidWhite(400, 300))
+        drawSelectedBox(on: view)
+
+        // 1 to 40 the way the knob sends it: one mouse down, then a value per
+        // mouse-moved event.
+        view.applySize(1, phase: .dragBegan)
+        for w in 2...40 {
+            view.applySize(w, phase: .dragContinued)
+        }
+        XCTAssertEqual(view.annotations[0].lineWidth, 40)
+
+        view.undo()
+        XCTAssertEqual(view.annotations.count, 1, "the drag swallowed the box itself")
+        XCTAssertEqual(view.annotations[0].lineWidth, 6,
+                       "the 40-step drag was more than one undo step")
+    }
+
+    func testASliderDragThatChangesNothingLeavesNoUndoStep() throws {
+        let view = canvas(try solidWhite(400, 300))
+        drawSelectedBox(on: view)
+        view.undo()          // remove the box, so the stack is empty and clean
+        view.redo()          // and put it back, leaving one real step
+        let stepsBefore = view.canUndo
+
+        // The knob is grabbed and released on the value it already had.
+        view.applySize(6, phase: .dragBegan)
+        view.applySize(6, phase: .dragContinued)
+
+        XCTAssertEqual(stepsBefore, view.canUndo)
+        view.undo()
+        XCTAssertEqual(view.annotations.count, 0,
+                       "a no-op slider drag left an undo step in front of the box")
+    }
+
+    func testTwoSeparateSliderDragsAreTwoUndoSteps() throws {
+        let view = canvas(try solidWhite(400, 300))
+        drawSelectedBox(on: view)
+
+        view.applySize(12, phase: .dragBegan)
+        view.applySize(20, phase: .dragContinued)
+        view.applySize(30, phase: .dragBegan)   // a second, separate grab
+        view.applySize(36, phase: .dragContinued)
+        XCTAssertEqual(view.annotations[0].lineWidth, 36)
+
+        view.undo()
+        XCTAssertEqual(view.annotations[0].lineWidth, 20,
+                       "the second drag was folded into the first")
+        view.undo()
+        XCTAssertEqual(view.annotations[0].lineWidth, 6)
+    }
+
+    // MARK: - Rectangle fill
+
+    func testAFilledRectangleFillsItsInteriorAndAStrokedOneDoesNot() throws {
+        let base = try solidWhite(120, 120)
+        let red = SRGB(r: 255, g: 0, b: 0)
+        let corners = (PixelPoint(x: 20, y: 20), PixelPoint(x: 99, y: 99))
+
+        let stroked = Annotation(kind: .box, from: corners.0, to: corners.1,
+                                 colour: red, lineWidth: 4, fillStyle: .stroke)
+        let filled = Annotation(kind: .box, from: corners.0, to: corners.1,
+                                colour: red, lineWidth: 4, fillStyle: .filled)
+
+        let a = try XCTUnwrap(AnnotationRenderer.flatten(base: base,
+                                                        annotations: [stroked],
+                                                        blockSize: 12))
+        let b = try XCTUnwrap(AnnotationRenderer.flatten(base: base,
+                                                        annotations: [filled],
+                                                        blockSize: 12))
+
+        // Dead centre, far from any border at this line width.
+        XCTAssertEqual(try colour(a, 60, 60), SRGB.white,
+                       "border only painted the middle of the rectangle")
+        XCTAssertEqual(try colour(b, 60, 60), red,
+                       "filled left the middle of the rectangle empty")
+        // Both still draw the edge, and neither leaks outside it.
+        XCTAssertEqual(try colour(a, 60, 20), red)
+        XCTAssertEqual(try colour(b, 60, 20), red)
+        XCTAssertEqual(try colour(a, 60, 5), SRGB.white)
+        XCTAssertEqual(try colour(b, 60, 5), SRGB.white)
+    }
+
+    func testFillStyleReachesANewRectangleButNeverAnArrow() throws {
+        let view = canvas(try solidWhite(400, 300))
+        view.applyFillStyle(.filled)
+
+        view.tool = .annotate(.box)
+        view.beginDrag(at: PixelPoint(x: 10, y: 10))
+        view.continueDrag(to: PixelPoint(x: 90, y: 90))
+        view.endDrag(at: PixelPoint(x: 90, y: 90))
+
+        view.tool = .annotate(.arrow)
+        view.beginDrag(at: PixelPoint(x: 150, y: 10))
+        view.continueDrag(to: PixelPoint(x: 250, y: 90))
+        view.endDrag(at: PixelPoint(x: 250, y: 90))
+
+        XCTAssertEqual(view.annotations[0].fillStyle, .filled)
+        // An arrow has no interior, so storing "filled" on one would be a value
+        // that never means anything and that every later reader has to check.
+        XCTAssertEqual(view.annotations[1].fillStyle, .stroke,
+                       "the rectangle fill setting leaked onto an arrow")
+    }
+
+    func testFillCanBeChangedOnARectangleThatAlreadyExists() throws {
+        let view = canvas(try solidWhite(200, 150))
+        drawSelectedBox(on: view)
+        XCTAssertEqual(view.annotations[0].fillStyle, .stroke)
+
+        view.applyFillStyle(.filled)
+        XCTAssertEqual(view.annotations[0].fillStyle, .filled)
+
+        view.undo()
+        XCTAssertEqual(view.annotations[0].fillStyle, .stroke,
+                       "undo did not put the fill back")
+    }
+
+    // MARK: - The toolbar follows the selection
+    //
+    // These go through the real controller rather than calling the toolbar
+    // directly. A toolbar that stops following the selection is a wiring bug,
+    // and a test that rebuilt the wiring itself could never catch it.
+
+    private func controller(_ image: CGImage) -> EditorWindowController {
+        EditorWindowController(image: image, shotID: nil, settings: settings())
+    }
+
+    func testSelectingAnAnnotationPointsTheToolbarAtIt() throws {
+        let c = controller(try solidWhite(400, 300))
+        let view = c.canvas
+
+        // A blue box, thick, on the left.
+        view.applyColour(SRGB(r: 0, g: 0, b: 255))
+        view.applySize(14, phase: .single)
+        view.tool = .annotate(.box)
+        view.beginDrag(at: PixelPoint(x: 10, y: 10))
+        view.continueDrag(to: PixelPoint(x: 100, y: 100))
+        view.endDrag(at: PixelPoint(x: 100, y: 100))
+
+        // Click away first. A shape stays selected after it is drawn, on
+        // purpose, so changing the colour now would recolour the blue box
+        // instead of setting the default for the next one.
+        view.tool = .select
+        view.beginDrag(at: PixelPoint(x: 200, y: 250))
+        view.endDrag(at: PixelPoint(x: 200, y: 250))
+        XCTAssertNil(view.selectedAnnotation)
+
+        // A green thin box on the right, which leaves green as the default.
+        view.applyColour(SRGB(r: 0, g: 255, b: 0))
+        view.applySize(2, phase: .single)
+        view.tool = .annotate(.box)
+        view.beginDrag(at: PixelPoint(x: 200, y: 10))
+        view.continueDrag(to: PixelPoint(x: 300, y: 100))
+        view.endDrag(at: PixelPoint(x: 300, y: 100))
+
+        // Click the blue one.
+        view.tool = .select
+        view.beginDrag(at: PixelPoint(x: 55, y: 10))
+        view.endDrag(at: PixelPoint(x: 55, y: 10))
+        XCTAssertEqual(view.selectedAnnotation?.colour, SRGB(r: 0, g: 0, b: 255),
+                       "the click did not select the blue box")
+
+        XCTAssertEqual(AnnotationRenderer.srgb(c.toolbar.colourWell.color),
+                       SRGB(r: 0, g: 0, b: 255),
+                       "the colour well still showed the default, not the selection")
+        XCTAssertEqual(Int(c.toolbar.widthSlider.doubleValue), 14,
+                       "the width slider still showed the default, not the selection")
+    }
+
+    func testDeselectingPutsTheToolbarBackOnTheDefaults() throws {
+        let c = controller(try solidWhite(400, 300))
+        let view = c.canvas
+
+        view.tool = .annotate(.box)
+        view.beginDrag(at: PixelPoint(x: 10, y: 10))
+        view.continueDrag(to: PixelPoint(x: 100, y: 100))
+        view.endDrag(at: PixelPoint(x: 100, y: 100))
+        view.applyColour(SRGB(r: 0, g: 0, b: 255))   // recolours the selection
+
+        // Click far away from everything.
+        view.tool = .select
+        view.beginDrag(at: PixelPoint(x: 350, y: 250))
+        view.endDrag(at: PixelPoint(x: 350, y: 250))
+        XCTAssertNil(view.selectedAnnotation)
+
+        XCTAssertEqual(AnnotationRenderer.srgb(c.toolbar.colourWell.color),
+                       view.colour,
+                       "with nothing selected the toolbar must show the defaults")
+    }
+
+    func testTheWidthSliderCoversAHairlineAndAMarker() throws {
+        let c = controller(try solidWhite(400, 300))
+        // The old buttons were 2, 4 and 8. The complaint was that neither end
+        // was reachable, so the range is asserted rather than left to drift.
+        XCTAssertLessThanOrEqual(c.toolbar.widthSlider.minValue, 1)
+        XCTAssertGreaterThanOrEqual(c.toolbar.widthSlider.maxValue, 40)
+    }
+
+    // MARK: - The one slider, two meanings
+    //
+    // Line width means nothing for text and font size means nothing for
+    // everything else, so the slider switches. The risk is that the toolbar and
+    // the canvas disagree about which it currently is, and a drag then writes a
+    // type size into a line width.
+
+    func testTheSliderMeansTextSizeForTextAndLineWidthForTheRest() throws {
+        let view = canvas(try solidWhite(400, 300))
+        XCTAssertEqual(view.sizeControl, .lineWidth, "with no tool it is a width")
+
+        view.tool = .annotate(.text)
+        XCTAssertEqual(view.sizeControl, .fontSize)
+        view.tool = .annotate(.box)
+        XCTAssertEqual(view.sizeControl, .lineWidth)
+
+        // A selection wins over the tool, because the controls act on what is
+        // selected. Otherwise picking the box tool while a label is selected
+        // would turn the slider back into a width and edit the wrong number.
+        view.tool = .annotate(.text)
+        view.beginDrag(at: PixelPoint(x: 40, y: 40))
+        view.endDrag(at: PixelPoint(x: 40, y: 40))
+        view.textView?.string = "hi"
+        view.beginDrag(at: PixelPoint(x: 300, y: 250))   // commit, goes idle
+        view.endDrag(at: PixelPoint(x: 300, y: 250))
+        view.tool = .select
+        view.beginDrag(at: PixelPoint(x: 45, y: 50))     // click the label
+        view.endDrag(at: PixelPoint(x: 45, y: 50))
+        XCTAssertEqual(view.selectedAnnotation?.kind, .text)
+        XCTAssertEqual(view.sizeControl, .fontSize)
+
+        view.tool = .annotate(.box)
+        XCTAssertEqual(view.sizeControl, .fontSize,
+                       "the selected label must keep the slider on text size")
+    }
+
+    func testTheSliderResizesTheTextAndNotItsLineWidth() throws {
+        let view = canvas(try solidWhite(400, 300))
+        view.tool = .annotate(.text)
+        view.beginDrag(at: PixelPoint(x: 40, y: 40))
+        view.endDrag(at: PixelPoint(x: 40, y: 40))
+        view.textView?.string = "big"
+        view.beginDrag(at: PixelPoint(x: 300, y: 250))
+        view.endDrag(at: PixelPoint(x: 300, y: 250))
+
+        view.tool = .select
+        view.beginDrag(at: PixelPoint(x: 45, y: 50))
+        view.endDrag(at: PixelPoint(x: 45, y: 50))
+        let before = try XCTUnwrap(view.selectedAnnotation)
+        XCTAssertEqual(before.fontSize, 28)
+
+        view.applySize(96, phase: .single)
+
+        let after = try XCTUnwrap(view.selectedAnnotation)
+        XCTAssertEqual(after.fontSize, 96)
+        XCTAssertEqual(after.lineWidth, before.lineWidth,
+                       "the slider wrote a type size into the line width")
+        // The box has to follow the type. A selection outline and a hit test
+        // that describe a rectangle no longer under the glyphs is the same bug
+        // as drawing them in the wrong place.
+        XCTAssertGreaterThan(after.boundingBox.height, before.boundingBox.height,
+                             "the box did not grow with the text")
+        XCTAssertGreaterThan(after.boundingBox.width, before.boundingBox.width)
+    }
+
+    func testTheSliderStillMeansLineWidthForAShape() throws {
+        let view = canvas(try solidWhite(400, 300))
+        drawSelectedBox(on: view)
+        let fontBefore = try XCTUnwrap(view.selectedAnnotation).fontSize
+
+        view.applySize(22, phase: .single)
+
+        let after = try XCTUnwrap(view.selectedAnnotation)
+        XCTAssertEqual(after.lineWidth, 22)
+        XCTAssertEqual(after.fontSize, fontBefore,
+                       "a line width change moved the font size")
+    }
+
+    func testAValueOutsideTheRangeIsClampedRatherThanStored() throws {
+        let view = canvas(try solidWhite(400, 300))
+        drawSelectedBox(on: view)
+
+        // 200 is inside the text range and far outside the width range. Storing
+        // it would draw a border wider than the screenshot, and the slider could
+        // never get back to it.
+        view.applySize(200, phase: .single)
+        XCTAssertEqual(view.selectedAnnotation?.lineWidth,
+                       Annotation.SizeControl.lineWidth.range.upperBound)
+
+        view.applySize(0, phase: .single)
+        XCTAssertEqual(view.selectedAnnotation?.lineWidth,
+                       Annotation.SizeControl.lineWidth.range.lowerBound)
+    }
+
+    func testResizingTextIsOneUndoStepPerDrag() throws {
+        let view = canvas(try solidWhite(400, 300))
+        view.tool = .annotate(.text)
+        view.beginDrag(at: PixelPoint(x: 40, y: 40))
+        view.endDrag(at: PixelPoint(x: 40, y: 40))
+        view.textView?.string = "label"
+        view.beginDrag(at: PixelPoint(x: 300, y: 250))
+        view.endDrag(at: PixelPoint(x: 300, y: 250))
+        view.tool = .select
+        view.beginDrag(at: PixelPoint(x: 45, y: 50))
+        view.endDrag(at: PixelPoint(x: 45, y: 50))
+
+        view.applySize(30, phase: .dragBegan)
+        for size in 31...120 {
+            view.applySize(size, phase: .dragContinued)
+        }
+        XCTAssertEqual(view.selectedAnnotation?.fontSize, 120)
+
+        view.undo()
+        XCTAssertEqual(view.selectedAnnotation?.fontSize, 28,
+                       "the 90-step resize was more than one undo step")
+        XCTAssertEqual(view.annotations.first?.text, "label",
+                       "undo went back past the label instead of past the resize")
+    }
+
+    func testTheToolbarSliderFollowsWhatItIsAbout() throws {
+        let c = controller(try solidWhite(400, 300))
+
+        // Picking the text tool has to move the slider onto the text range. A
+        // 1 to 40 slider in front of a 28 pixel type size would clamp every
+        // value the user picked down to 40.
+        c.canvas.tool = .annotate(.text)
+        XCTAssertEqual(c.toolbar.sizeControl, .fontSize)
+        XCTAssertEqual(Int(c.toolbar.widthSlider.maxValue),
+                       Annotation.SizeControl.fontSize.range.upperBound)
+        XCTAssertEqual(Int(c.toolbar.widthSlider.doubleValue), c.canvas.fontSize)
+
+        c.canvas.tool = .annotate(.box)
+        XCTAssertEqual(c.toolbar.sizeControl, .lineWidth)
+        XCTAssertEqual(Int(c.toolbar.widthSlider.maxValue),
+                       Annotation.SizeControl.lineWidth.range.upperBound)
+        XCTAssertEqual(Int(c.toolbar.widthSlider.doubleValue), c.canvas.lineWidth)
+    }
+
+    func testTheToolbarNeverTakesTheKeyboardOffTheCanvas() throws {
+        let c = controller(try solidWhite(400, 300))
+        // A slider or a segmented control that accepts first responder swallows
+        // every later single-key tool shortcut. The keyboard flow then dies
+        // silently the first time the user touches the width, and nothing about
+        // a screenshot of the window shows it.
+        XCTAssertTrue(c.toolbar.widthSlider.refusesFirstResponder,
+                      "the width slider would steal the keyboard from the canvas")
+        XCTAssertTrue(c.toolbar.fillControl.refusesFirstResponder,
+                      "the fill control would steal the keyboard from the canvas")
+    }
+
+    func testFillIsOfferedForARectangleAndNotForTheRest() throws {
+        let c = controller(try solidWhite(400, 300))
+
+        c.toolbar.setTool(.annotate(.box))
+        XCTAssertTrue(c.toolbar.fillControl.isEnabled)
+
+        c.toolbar.setTool(.annotate(.arrow))
+        XCTAssertFalse(c.toolbar.fillControl.isEnabled,
+                       "an arrow offered a fill setting that does nothing")
+
+        // And with a selection it follows what is selected, not the tool.
+        c.toolbar.showAttributes(colour: .black, lineWidth: 4, fontSize: 28,
+                                 fillStyle: .stroke, selectedKind: .box)
+        XCTAssertTrue(c.toolbar.fillControl.isEnabled)
+        c.toolbar.showAttributes(colour: .black, lineWidth: 4, fontSize: 28,
+                                 fillStyle: .stroke, selectedKind: .text)
+        XCTAssertFalse(c.toolbar.fillControl.isEnabled)
+    }
+
+    // MARK: - Escape, and finishing a text label
+
+    /// A real key-down event, because `keyDown` is the thing under test and a
+    /// hand-rolled substitute would only test the substitute.
+    private func keyEvent(_ code: UInt16, _ chars: String) throws -> NSEvent {
+        try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero,
+                                       modifierFlags: [], timestamp: 0,
+                                       windowNumber: 0, context: nil,
+                                       characters: chars,
+                                       charactersIgnoringModifiers: chars,
+                                       isARepeat: false, keyCode: code))
+    }
+
+    private let escape: UInt16 = 53
+
+    func testEscapeCopiesAndCloses() throws {
+        let view = canvas(try solidWhite(200, 150))
+        var seen: [EditorCanvasView.Command] = []
+        view.onCommand = { seen.append($0); return true }
+
+        view.keyDown(with: try keyEvent(escape, "\u{1B}"))
+
+        XCTAssertEqual(seen, [.copyAndClose],
+                       "Escape must copy and close in one press")
+    }
+
+    func testEscapeCancelsAPendingCropBeforeItClosesAnything() throws {
+        let view = canvas(try solidWhite(400, 300))
+        var seen: [EditorCanvasView.Command] = []
+        view.onCommand = { seen.append($0); return true }
+
+        view.tool = .crop
+        view.beginDrag(at: PixelPoint(x: 20, y: 20))
+        view.continueDrag(to: PixelPoint(x: 200, y: 150))
+        view.endDrag(at: PixelPoint(x: 200, y: 150))
+        XCTAssertNotNil(view.cropRect)
+
+        // A crop rectangle is drawn but not applied. Without a way to abandon
+        // it, the only exits would be destroying pixels or losing the window.
+        view.keyDown(with: try keyEvent(escape, "\u{1B}"))
+        XCTAssertNil(view.cropRect)
+        XCTAssertEqual(seen, [], "Escape closed the window with a crop pending")
+
+        // The second press has nothing left to back out of, so it closes.
+        view.keyDown(with: try keyEvent(escape, "\u{1B}"))
+        XCTAssertEqual(seen, [.copyAndClose])
+    }
+
+    func testEscapeStillClosesWithSomethingSelected() throws {
+        let view = canvas(try solidWhite(400, 300))
+        var seen: [EditorCanvasView.Command] = []
+        view.onCommand = { seen.append($0); return true }
+        drawSelectedBox(on: view)
+        XCTAssertNotNil(view.selectedAnnotation)
+
+        // Every shape stays selected after it is drawn. If Escape only cleared
+        // the selection, the key would appear to do nothing straight after the
+        // most common action in the whole editor.
+        view.keyDown(with: try keyEvent(escape, "\u{1B}"))
+        XCTAssertEqual(seen, [.copyAndClose])
+    }
+
+    func testFinishingALabelGoesIdleInsteadOfStartingAnother() throws {
+        let view = canvas(try solidWhite(400, 300))
+        view.tool = .annotate(.text)
+
+        view.beginDrag(at: PixelPoint(x: 40, y: 40))
+        view.endDrag(at: PixelPoint(x: 40, y: 40))
+        XCTAssertTrue(view.isEditingText, "the text tool did not open an editor")
+        view.textView?.string = "hello"
+
+        // Click somewhere else, which is how anyone finishes a floating field.
+        view.beginDrag(at: PixelPoint(x: 300, y: 250))
+        view.endDrag(at: PixelPoint(x: 300, y: 250))
+
+        XCTAssertFalse(view.isEditingText)
+        XCTAssertEqual(view.tool, .select,
+                       "the editor stayed on the text tool after finishing a label")
+        XCTAssertEqual(view.annotations.count, 1,
+                       "the click that ended one label started a second one")
+        XCTAssertEqual(view.annotations[0].text, "hello")
+    }
+
+    func testEscapeInsideALabelCommitsItAndGoesIdleWithoutClosing() throws {
+        let view = canvas(try solidWhite(400, 300))
+        var seen: [EditorCanvasView.Command] = []
+        view.onCommand = { seen.append($0); return true }
+        view.tool = .annotate(.text)
+        view.beginDrag(at: PixelPoint(x: 40, y: 40))
+        view.endDrag(at: PixelPoint(x: 40, y: 40))
+        let tv = try XCTUnwrap(view.textView)
+        tv.string = "typed"
+
+        // Escape reaches the text view, not `keyDown`. It must keep what was
+        // typed: losing it is worse than keeping something unwanted, which one
+        // more Escape then discards.
+        _ = view.textView(tv, doCommandBy: #selector(NSResponder.cancelOperation(_:)))
+
+        XCTAssertFalse(view.isEditingText)
+        XCTAssertEqual(view.tool, .select)
+        XCTAssertEqual(view.annotations.first?.text, "typed")
+        XCTAssertEqual(seen, [], "Escape closed the window instead of ending the label")
+    }
+
+    func testAnEmptyLabelLeavesNothingBehind() throws {
+        let view = canvas(try solidWhite(400, 300))
+        view.tool = .annotate(.text)
+        view.beginDrag(at: PixelPoint(x: 40, y: 40))
+        view.endDrag(at: PixelPoint(x: 40, y: 40))
+
+        // Clicked the text tool by mistake and clicked away. An invisible empty
+        // annotation that still hit-tests would be worse than nothing.
+        view.beginDrag(at: PixelPoint(x: 300, y: 250))
+        view.endDrag(at: PixelPoint(x: 300, y: 250))
+
+        XCTAssertEqual(view.annotations.count, 0)
+        XCTAssertEqual(view.tool, .select)
+    }
+
+    func testTheSliderPhaseMachineSeesOneDragAsOneDrag() {
+        let toolbar = EditorToolbar(colour: .black, lineWidth: 4)
+
+        // A grab on the knob: down, then moves, then up.
+        XCTAssertEqual(toolbar.sliderPhase(for: .leftMouseDown), .dragBegan)
+        XCTAssertEqual(toolbar.sliderPhase(for: .leftMouseDragged), .dragContinued)
+        XCTAssertEqual(toolbar.sliderPhase(for: .leftMouseDragged), .dragContinued)
+        XCTAssertEqual(toolbar.sliderPhase(for: .leftMouseUp), .dragContinued)
+
+        // A click on the track, where AppKit can send the first action only once
+        // the mouse has already moved. That is still the start of a drag.
+        XCTAssertEqual(toolbar.sliderPhase(for: .leftMouseDragged), .dragBegan)
+        XCTAssertEqual(toolbar.sliderPhase(for: .leftMouseDragged), .dragContinued)
+        XCTAssertEqual(toolbar.sliderPhase(for: .leftMouseUp), .dragContinued)
+
+        // The keyboard and accessibility are complete changes on their own.
+        XCTAssertEqual(toolbar.sliderPhase(for: .keyDown), .single)
+        XCTAssertEqual(toolbar.sliderPhase(for: nil), .single)
     }
 }

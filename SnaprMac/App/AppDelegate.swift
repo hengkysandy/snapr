@@ -204,6 +204,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .captureFullScreen:  captureWholeScreen()
         case .captureWindow:      captureFrontWindow()
         case .captureDelayed:     scheduleDelayedCapture()
+        case .captureText:        beginAreaCapture(kind: .area, mode: .grabText)
+        case .captureScrolling:   toggleScrollCapture()
         case .repeatLastArea:     repeatLastArea()
         case .openHistory:        showHistory()
         }
@@ -235,7 +237,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// chosen over `SCContentFilter(excludingWindows:)` because it is correct
     /// by construction rather than by remembering a filter, and because it is
     /// the only way zoom, pixel measurement and colour picking can work at all.
-    private func beginAreaCapture(kind: CaptureKind) {
+    /// What to do with the region once the user has drawn it.
+    ///
+    /// A separate flag rather than a new `CaptureKind`, because `CaptureKind` is
+    /// stored on every row in the library and describes what a screenshot IS. A
+    /// text grab never becomes a row, so putting it in that enum would add a
+    /// case that no stored shot can ever have.
+    private enum SelectionMode {
+        case screenshot
+        case grabText
+        case scroll
+    }
+
+    private func beginAreaCapture(kind: CaptureKind, mode: SelectionMode = .screenshot) {
         guard let screen = screenUnderCursor() else {
             Log.capture.error("no screen under the cursor")
             return
@@ -250,6 +264,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 Log.capture.info("frozen frame \(frozen.width)x\(frozen.height) in \(Redact.ms(CFAbsoluteTimeGetCurrent() - start), privacy: .public)")
                 pendingKind = kind
+                pendingMode = mode
                 pendingFrozen = frozen
                 // Fetched AFTER the capture, so enumeration never delays the
                 // freeze. The frame is already still by this point, so the
@@ -266,20 +281,123 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var pendingFrozen: CGImage?
     private var pendingKind: CaptureKind = .area
+    private var pendingMode: SelectionMode = .screenshot
 
     private func overlayFinished(_ outcome: OverlayOutcome) {
         guard let frozen = pendingFrozen else { return }
         pendingFrozen = nil
+        let mode = pendingMode
+        pendingMode = .screenshot
         switch outcome {
         case .cancelled:
             Log.overlay.info("selection cancelled")
         case .region(let rect):
-            lastAreaRect = rect
             guard let cropped = ImageBridge.crop(frozen, to: rect) else {
                 Log.overlay.error("crop produced nothing for a \(rect.width)x\(rect.height) region")
                 return
             }
-            finish(image: cropped, kind: pendingKind)
+            switch mode {
+            case .screenshot:
+                // Only a real screenshot updates "repeat last area". Repeating
+                // a text grab as a screenshot would be a shortcut that does
+                // something different from the one that set it up.
+                lastAreaRect = rect
+                finish(image: cropped, kind: pendingKind)
+            case .grabText:
+                grabText(from: cropped)
+            case .scroll:
+                // The region, not the crop. The run re-captures this rectangle
+                // over and over as the user scrolls under it.
+                startScrollCapture(region: rect)
+            }
+        }
+    }
+
+    // MARK: - Scrolling capture
+
+    private var scrollSession: ScrollCaptureSession?
+    private var scrollHUD: ScrollCaptureHUD?
+
+    /// The one shortcut both starts and ends a run.
+    ///
+    /// It has to. Snapr cannot hold the keyboard while the user scrolls another
+    /// window, so there is no Escape and no Return to end it with. A second
+    /// press of the shortcut that started it is the one key that always works.
+    private func toggleScrollCapture() {
+        if let session = scrollSession, session.isRunning {
+            session.stop()
+            return
+        }
+        beginAreaCapture(kind: .area, mode: .scroll)
+    }
+
+    private func startScrollCapture(region: PixelRect) {
+        guard let screen = screenUnderCursor() else { return }
+
+        let hud = ScrollCaptureHUD()
+        let session = ScrollCaptureSession(capture: capture, screen: screen, region: region)
+        scrollHUD = hud
+        scrollSession = session
+
+        hud.onDone = { [weak session] in session?.stop() }
+        hud.onCancel = { [weak self] in
+            self?.scrollSession = nil
+            self?.scrollHUD?.close()
+            self?.scrollHUD = nil
+            Log.capture.info("scroll capture cancelled")
+        }
+        session.onProgress = { [weak hud] height, lost in
+            hud?.update(height: height, lost: lost)
+        }
+        session.onEnded = { [weak self] ending in
+            guard let self else { return }
+            self.scrollHUD?.close()
+            self.scrollHUD = nil
+            self.scrollSession = nil
+            switch ending {
+            case .finished(let image):
+                // A scrolling capture is a screenshot like any other, so it goes
+                // into the library and opens in the editor.
+                self.finish(image: image, kind: .area)
+            case .nothing:
+                Toast.shared.show(Toast.Content(
+                    title: "Nothing to stitch",
+                    detail: "Scroll the window while the capture is running",
+                    symbol: "arrow.down.doc",
+                    tint: .systemOrange))
+            case .failed(let error):
+                self.report(captureError: error)
+            }
+        }
+
+        hud.show(on: screen)
+        session.start()
+    }
+
+    /// Read the text in a region and put it on the clipboard. Nothing is stored.
+    ///
+    /// A text grab is not a screenshot, so it never reaches the library, never
+    /// gets a thumbnail and never appears in the history. The user asked for
+    /// some words, and keeping an encrypted picture of them is a surprise they
+    /// did not ask for.
+    private func grabText(from image: CGImage) {
+        Task { @MainActor in
+            do {
+                let found = try await OCRService.text(in: image)
+                let grab = TextGrab.clipboard(text: found.text, barcodes: found.barcodes)
+                if let grab {
+                    let pasteboard = NSPasteboard.general
+                    pasteboard.clearContents()
+                    pasteboard.setString(grab.text, forType: .string)
+                }
+                // Counts only. The recognised text is the contents of the
+                // user's screen and never goes into a log.
+                Log.ocr.info("text grab, \(grab?.lines ?? 0, privacy: .public) lines")
+                Toast.shared.showTextGrab(grab)
+            } catch {
+                Log.ocr.error("text grab failed, \(String(describing: type(of: error)), privacy: .public)")
+                NSSound.beep()
+            }
         }
     }
 
@@ -413,15 +531,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func saveToDownloads(_ image: CGImage) {
         guard let png = ImageBridge.pngData(from: image) else { return }
         let shot = Shot(kind: .area, size: PixelSize(width: image.width, height: image.height))
-        let dir = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
-        let url = dir.appendingPathComponent(SaveName.suggested(for: shot))
         do {
-            // A plain PNG on purpose. The library is encrypted, but a file the
-            // user asked for is not the library.
-            try png.write(to: url)
+            let url = try DownloadsWriter.write(png, suggested: SaveName.suggested(for: shot))
             Log.app.info("saved \(Redact.bytes(png.count), privacy: .public) to Downloads")
+            // Same receipt as the editor's save. With no editor opening at all,
+            // this is the only sign the capture went anywhere.
+            Toast.shared.showSaved(fileAt: url)
         } catch {
-            Log.app.error("save failed: \(String(describing: error), privacy: .public)")
+            // The message from a file system error contains the path, which is
+            // the user's own business. Only the domain and code are logged.
+            let ns = error as NSError
+            Log.app.error("save failed, \(ns.domain, privacy: .public) \(ns.code, privacy: .public)")
         }
     }
 

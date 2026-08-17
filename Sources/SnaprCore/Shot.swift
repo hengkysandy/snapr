@@ -126,4 +126,30 @@ public enum SaveName {
         f.locale = Locale(identifier: "en_US_POSIX")
         return "Snapr \(f.string(from: date ?? shot.createdAt)).png"
     }
+
+    /// The first name that nothing has taken yet: the name itself, then
+    /// "… 2", "… 3", and so on before the extension.
+    ///
+    /// This exists because saving no longer asks the user for a name. The
+    /// suggested name carries a timestamp down to the second, so a collision
+    /// needs two saves inside the same second, which is exactly what pressing
+    /// the save shortcut twice produces. Overwriting the first file would be
+    /// data loss that the user never sees happen.
+    ///
+    /// `isTaken` is passed in rather than read from disk here, so the rule can
+    /// be tested without creating any files.
+    public static func deduplicated(_ name: String, isTaken: (String) -> Bool) -> String {
+        guard isTaken(name) else { return name }
+
+        let dot = name.lastIndex(of: ".")
+        let stem = dot.map { String(name[name.startIndex..<$0]) } ?? name
+        let ext = dot.map { String(name[$0...]) } ?? ""
+
+        for n in 2...999 where !isTaken("\(stem) \(n)\(ext)") {
+            return "\(stem) \(n)\(ext)"
+        }
+        // A thousand files in one second means something else is wrong. A name
+        // nothing can collide with still beats silently overwriting.
+        return "\(stem) \(UUID().uuidString)\(ext)"
+    }
 }

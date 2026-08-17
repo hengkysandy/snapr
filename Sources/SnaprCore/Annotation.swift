@@ -19,9 +19,9 @@ public struct Annotation: Identifiable, Equatable, Sendable, Codable {
         public var label: String {
             switch self {
             case .arrow: return "Arrow"
-            case .box: return "Box"
+            case .box: return "Rectangle"
             case .text: return "Text"
-            case .counter: return "Step"
+            case .counter: return "Counter"
             case .blur: return "Blur"
             case .highlight: return "Highlight"
             }
@@ -32,11 +32,67 @@ public struct Annotation: Identifiable, Equatable, Sendable, Codable {
         public var shortcut: String {
             switch self {
             case .arrow: return "a"
-            case .box: return "b"
+            case .box: return "r"
             case .text: return "t"
-            case .counter: return "s"
+            case .counter: return "c"
             case .blur: return "e"
             case .highlight: return "h"
+            }
+        }
+
+        /// What the toolbar's size slider changes for this kind.
+        ///
+        /// Text has no line width, and nothing else has a font size, so one
+        /// slider serves both rather than a second one appearing and vanishing.
+        /// Before this the slider was simply dead while text was selected, and
+        /// a control that moves and changes nothing reads as a broken app.
+        public var sizeControl: SizeControl {
+            self == .text ? .fontSize : .lineWidth
+        }
+    }
+
+    /// The two things the one size slider can mean, with the range for each.
+    ///
+    /// The rule lives here, in the one place both the toolbar and the canvas
+    /// read it from. Deciding it twice is how the slider ends up showing a
+    /// width while it edits a type size.
+    public enum SizeControl: String, Sendable, CaseIterable {
+        case lineWidth
+        case fontSize
+
+        public var label: String {
+            switch self {
+            case .lineWidth: return "Line width"
+            case .fontSize: return "Text size"
+            }
+        }
+
+        /// In image pixels. One is a hairline on a retina screenshot and forty
+        /// is a marker pen over a whole button. Ten point type is already small
+        /// on a 2x capture, and 160 spans a headline across it.
+        public var range: ClosedRange<Int> {
+            switch self {
+            case .lineWidth: return 1...40
+            case .fontSize: return 10...160
+            }
+        }
+
+        public func clamp(_ value: Int) -> Int {
+            min(max(value, range.lowerBound), range.upperBound)
+        }
+    }
+
+    /// How a rectangle is painted. Only `.box` uses it, but it lives on the
+    /// annotation rather than in a separate type because one optional field is
+    /// cheaper than a parallel hierarchy for a single shape.
+    public enum FillStyle: String, Sendable, Codable, CaseIterable {
+        case stroke
+        case filled
+
+        public var label: String {
+            switch self {
+            case .stroke: return "Border only"
+            case .filled: return "Filled"
             }
         }
     }
@@ -54,6 +110,8 @@ public struct Annotation: Identifiable, Equatable, Sendable, Codable {
     /// Step number, for `.counter`. Assigned by `AnnotationStack`.
     public var counterValue: Int
     public var fontSize: Int
+    /// Border only, or filled. Ignored by every kind except `.box`.
+    public var fillStyle: FillStyle
 
     public init(id: UUID = UUID(),
                 kind: Kind,
@@ -63,7 +121,8 @@ public struct Annotation: Identifiable, Equatable, Sendable, Codable {
                 lineWidth: Int = 4,
                 text: String = "",
                 counterValue: Int = 0,
-                fontSize: Int = 28) {
+                fontSize: Int = 28,
+                fillStyle: FillStyle = .stroke) {
         self.id = id
         self.kind = kind
         self.from = from
@@ -73,6 +132,7 @@ public struct Annotation: Identifiable, Equatable, Sendable, Codable {
         self.text = text
         self.counterValue = counterValue
         self.fontSize = fontSize
+        self.fillStyle = fillStyle
     }
 
     public var boundingBox: PixelRect {

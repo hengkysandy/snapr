@@ -15,6 +15,16 @@ Requires macOS 15 or later. Apple Silicon and Intel.
 area. The selection runs over a frozen still of the screen, so nothing moves
 under you while you aim.
 
+**Capture a long page** with `⌃⇧5`. Draw a region, then scroll that window
+yourself while a small panel counts the height. Press `⌃⇧5` again, or click
+Done, and the frames are joined into one tall image. Sticky headers and footers
+are detected and appear once rather than being stamped through the middle.
+
+*You* scroll, not the app, and that is on purpose: making the app scroll for you
+would require the Accessibility permission, which Snapr does not want. If you
+scroll faster than it can follow it skips a frame and says so, rather than
+guessing and quietly dropping a paragraph.
+
 **While selecting**
 
 | | |
@@ -35,13 +45,46 @@ rectangle, it stays silent instead, so when it misses you simply get the window.
 Small toolbar icon buttons are its worst case: it tends to find the icon rather
 than the button. `docs/design.md` sections 5.4 and 5.5 have the numbers.
 
-**Annotate** with arrows, boxes, text, numbered steps, pixelated blur and
-highlight. Undo and redo. Crop. Copy, save as PNG, or drag the image straight
-into another app.
+**Annotate** with arrows, rectangles, text, numbered counters, pixelated blur and
+highlight. Rectangles are filled or border only. One slider sets the size: line
+width from a hairline to a marker pen, and for text the type size, because line
+width means nothing for a label.
+
+Anything already drawn can still be changed. Select it and the colour, width and
+fill controls point at that shape instead of at the next one, so a box in the
+wrong colour is one click to fix rather than an undo and a redraw.
+
+Text goes back to idle when you finish a label, so typing one caption does not
+start the next one.
+
+Undo and redo, where a whole drag is one step. Crop. Copy, save, or drag the
+image straight into another app.
+
+**Finishing a screenshot** takes one key. `Esc` copies it to the clipboard and
+closes the window. `Cmd+S` writes a timestamped PNG to Downloads and closes the
+window, with no panel asking you to name it. Neither ever overwrites a file that
+is already there. A small receipt appears for a few seconds naming the file;
+click it to show the file in the Finder.
 
 **Find it again.** Every capture is read with Apple's Vision framework, offline,
 and indexed. Search returns matches from your oldest screenshots, not just the
 recent ones. QR codes and barcodes are decoded in the same pass.
+
+**Get the text out.** Three ways, depending on what you have:
+
+| | |
+|---|---|
+| `⌃⇧T` | Drag a region and the text in it goes straight to the clipboard. No screenshot is kept |
+| `⇧⌘C` in the editor | The text in the picture you are looking at |
+| Right-click in the history | The text of a screenshot you took weeks ago, already recognised, so it is instant |
+
+Text wins over barcodes: a QR code is copied only when there is no readable
+text, so a page of prose never comes back with a URL glued to the end. If
+nothing is found, your clipboard is left exactly as it was, and the app says so
+rather than quietly replacing it with nothing.
+
+In the editor this reads the picture **as you see it**, so text under a blur
+stays unreadable and anything you cropped away is gone.
 
 ## Privacy
 
@@ -55,8 +98,8 @@ recent ones. QR codes and barcodes are decoded in the same pass.
 - **Nothing sensitive is logged.** The app never writes OCR text, window titles,
   filenames you chose, or the colours you picked into any log. It logs counts,
   sizes and durations.
-- An explicit `Cmd+S` writes an ordinary PNG. A file you asked for is not part
-  of the encrypted library.
+- An explicit `Cmd+S` writes an ordinary PNG to Downloads. A file you asked for
+  is not part of the encrypted library.
 
 ## Installing
 
@@ -99,6 +142,8 @@ behalf, something is wrong.
 | Capture full screen | `⌃⇧3` |
 | Capture window | `⌃⇧1` |
 | Delayed capture (3s) | `⌃⇧2` |
+| Copy text from area | `⌃⇧T` |
+| Scrolling capture | `⌃⇧5` (press again to finish) |
 | Repeat last area | `⌃⇧R` |
 | Open history | `⌃⇧H` |
 
@@ -137,7 +182,7 @@ and run Snapr, only to notarise it for other people.
 
 ## What it deliberately does not do
 
-No scrolling capture, no content-aware erase, no video or GIF recording, no
+No content-aware erase, no video or GIF recording, no
 upload to any service, and no iCloud sync. Each of those was considered and left
 out rather than forgotten.
 
@@ -145,7 +190,7 @@ out rather than forgotten.
 
 ```
 Sources/SnaprCore/     every decision. No AppKit, no ScreenCaptureKit, no Vision
-Tests/SnaprCoreTests/  70 tests, 0.12 s, no app and no permission needed
+Tests/SnaprCoreTests/  97 tests, 0.14 s, no app and no permission needed
 SnaprMac/              the thin shell that touches macOS
 docs/design.md         the design, and the measurements that produced it
 CONTRACTS.md           the module boundaries

@@ -1,6 +1,5 @@
 import AppKit
 import SnaprCore
-import UniformTypeIdentifiers
 
 /// How the editor ended. Reported once, through `onResult`.
 enum EditorResult: Sendable {
@@ -21,8 +20,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
 
     var onResult: ((EditorResult) -> Void)?
 
-    private let canvas: EditorCanvasView
-    private let toolbar: EditorToolbar
+    // Internal rather than private so the tests can drive the real wiring
+    // between the two. A toolbar that stops following the selection is a wiring
+    // bug, and a test that rebuilt the wiring itself would never catch it.
+    let canvas: EditorCanvasView
+    let toolbar: EditorToolbar
     private let scrollView = NSScrollView()
     private let shotID: UUID?
     private let settings: Settings
@@ -120,15 +122,22 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         toolbar.onToolChanged = { [weak self] tool in
             self?.canvas.tool = tool
         }
+        // These three go through `apply`, not through the plain properties. With
+        // an annotation selected they change that annotation as well as the
+        // default for the next one.
         toolbar.onColourChanged = { [weak self] colour in
-            self?.canvas.colour = colour
+            self?.canvas.applyColour(colour)
         }
-        toolbar.onLineWidthChanged = { [weak self] width in
-            self?.canvas.lineWidth = width
+        toolbar.onSizeChanged = { [weak self] value, phase in
+            self?.canvas.applySize(value, phase: phase)
+        }
+        toolbar.onFillStyleChanged = { [weak self] style in
+            self?.canvas.applyFillStyle(style)
         }
         toolbar.onUndo = { [weak self] in self?.canvas.undo() }
         toolbar.onRedo = { [weak self] in self?.canvas.redo() }
         toolbar.onCopy = { [weak self] in self?.copyToPasteboard() }
+        toolbar.onCopyText = { [weak self] in self?.copyRecognisedText() }
         toolbar.onSave = { [weak self] in self?.saveAsPNG() }
         toolbar.onZoomIn = { [weak self] in self?.canvas.zoomIn() }
         toolbar.onZoomOut = { [weak self] in self?.canvas.zoomOut() }
@@ -140,7 +149,13 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
             self?.toolbar.setZoom(zoom)
         }
         canvas.onToolChanged = { [weak self] tool in
-            self?.toolbar.setTool(tool)
+            guard let self else { return }
+            self.toolbar.setTool(tool)
+            // The size slider means text size for the text tool and line width
+            // for everything else, so a tool change has to refresh the style
+            // controls as well as the buttons. Without this, picking the text
+            // tool leaves a 1 to 40 slider sitting in front of a type size.
+            self.showAttributes(of: self.canvas.selectedAnnotation)
         }
         canvas.onImageChanged = { [weak self] size in
             self?.updateTitle(size)
@@ -150,16 +165,31 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
             self.toolbar.setUndoState(canUndo: self.canvas.canUndo,
                                       canRedo: self.canvas.canRedo)
         }
+        canvas.onSelectionChanged = { [weak self] selected in
+            self?.showAttributes(of: selected)
+        }
         // Cmd+C, Cmd+S and Cmd+W reach the canvas first as key equivalents. The
         // canvas handles the ones it owns and hands these three back up.
         canvas.onCommand = { [weak self] command in
             guard let self else { return false }
             switch command {
             case .copy: self.copyToPasteboard(); return true
+            case .copyText: self.copyRecognisedText(); return true
             case .save: self.saveAsPNG(); return true
             case .close: self.closeEditor(); return true
+            case .copyAndClose: self.copyAndClose(); return true
             }
         }
+    }
+
+    /// Show the selected annotation's style, or the defaults when nothing is
+    /// selected, because those are what the controls will change next.
+    private func showAttributes(of selected: Annotation?) {
+        toolbar.showAttributes(colour: selected?.colour ?? canvas.colour,
+                               lineWidth: selected?.lineWidth ?? canvas.lineWidth,
+                               fontSize: selected?.fontSize ?? canvas.fontSize,
+                               fillStyle: selected?.fillStyle ?? canvas.fillStyle,
+                               selectedKind: selected?.kind)
     }
 
     private func updateTitle(_ size: PixelSize) {
@@ -190,34 +220,70 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         onResult?(.copied)
     }
 
+    /// Read the text in the picture and put it on the clipboard.
+    ///
+    /// Runs on the FLATTENED image, not the original, so what you see is what
+    /// you get. A blur over a password is pixelation, which recognition cannot
+    /// read, and a crop removes what is outside it. Reading the original would
+    /// quietly hand back the very text the user just hid.
+    private func copyRecognisedText() {
+        guard let flat = renderFlattened() else {
+            Log.editor.error("copy text failed, flatten produced nothing")
+            NSSound.beep()
+            return
+        }
+        let screen = window?.screen
+        Task { @MainActor in
+            do {
+                let found = try await OCRService.text(in: flat)
+                let grab = TextGrab.clipboard(text: found.text, barcodes: found.barcodes)
+                if let grab {
+                    let board = NSPasteboard.general
+                    board.clearContents()
+                    board.setString(grab.text, forType: .string)
+                }
+                // Counts only. The recognised text is the contents of the
+                // user's screen and never goes into a log.
+                Log.editor.info("copied text, \(grab?.lines ?? 0, privacy: .public) lines")
+                Toast.shared.showTextGrab(grab, on: screen)
+            } catch {
+                Log.editor.error("recognition failed, \(String(describing: type(of: error)), privacy: .public)")
+                NSSound.beep()
+            }
+        }
+    }
+
+    /// Save straight to Downloads under the suggested name, then close.
+    ///
+    /// No save panel. Naming a screenshot is a decision nobody wants to make
+    /// forty times a day, and the panel turned a one-key save into a dialogue,
+    /// a folder to pick and a Return. `DownloadsWriter` refuses to overwrite,
+    /// so pressing this twice leaves two files rather than one.
     private func saveAsPNG() {
-        guard let window else { return }
         guard let flat = renderFlattened(), let png = ImageBridge.pngData(from: flat) else {
             Log.editor.error("save failed, flatten produced no PNG")
             NSSound.beep()
             return
         }
-
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.png]
-        panel.canCreateDirectories = true
-        // Design 6.4: the library is encrypted, but an explicit save writes an
-        // ordinary PNG, because a file the user asked for is not the library.
-        panel.nameFieldStringValue = suggestedFilename()
-        panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, let url = panel.url else { return }
-            do {
-                try png.write(to: url, options: .atomic)
-                // The path is the user's own choice, so only the size is logged.
-                Log.editor.info("saved PNG, \(Redact.bytes(png.count), privacy: .public)")
-                self?.onResult?(.saved(url))
-            } catch {
-                // A file system error message contains the path, which is user
-                // content. Only the domain and code go into the log.
-                let ns = error as NSError
-                Log.editor.error("save failed, \(ns.domain, privacy: .public) \(ns.code, privacy: .public)")
-                NSSound.beep()
-            }
+        do {
+            let url = try DownloadsWriter.write(png, suggested: suggestedFilename())
+            // The filename carries a timestamp and nothing else, but the path
+            // is still the user's, so only the size is logged.
+            Log.editor.info("saved PNG to Downloads, \(Redact.bytes(png.count), privacy: .public)")
+            onResult?(.saved(url))
+            // Shown on the screen the editor was on, and before the window
+            // closes, because after that there is nothing left to read a
+            // position from.
+            Toast.shared.showSaved(fileAt: url, on: window?.screen)
+            window?.performClose(nil)
+        } catch {
+            // A file system error message contains the path, which is user
+            // content. Only the domain and code go into the log.
+            let ns = error as NSError
+            Log.editor.error("save failed, \(ns.domain, privacy: .public) \(ns.code, privacy: .public)")
+            // The window stays open. Closing it after a failed save would throw
+            // the annotations away along with the file that never appeared.
+            NSSound.beep()
         }
     }
 
@@ -237,6 +303,17 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         if settings.copyOnClose {
             copyToPasteboard()
         }
+        window?.performClose(nil)
+    }
+
+    /// Escape. Always copies, whatever `copyOnClose` says.
+    ///
+    /// Cmd+W means "close this", and whether it copies is a preference. Escape
+    /// means "I am done with this screenshot", and the reason to be done with
+    /// one is almost always to paste it somewhere. Leaving that to a setting
+    /// would make the key do nothing visible for anyone who never found it.
+    private func copyAndClose() {
+        copyToPasteboard()
         window?.performClose(nil)
     }
 

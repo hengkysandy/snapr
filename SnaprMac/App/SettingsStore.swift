@@ -27,7 +27,11 @@ final class SettingsStore {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         if let data = defaults.data(forKey: key),
-           let decoded = try? JSONDecoder().decode(Settings.self, from: data) {
+           var decoded = try? JSONDecoder().decode(Settings.self, from: data) {
+            // A settings file written by an older build has no entry for an
+            // action added since. Without this the new shortcut does nothing at
+            // all for anyone who has run the app before.
+            decoded.fillInMissingHotkeys()
             self.settings = decoded
         } else {
             self.settings = Settings()

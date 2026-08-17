@@ -39,6 +39,7 @@ public struct HotkeySpec: Equatable, Hashable, Sendable, Codable {
         public static let six: UInt32 = 22
         public static let h: UInt32 = 4
         public static let r: UInt32 = 15
+        public static let t: UInt32 = 17
         public static let w: UInt32 = 13
     }
 
@@ -65,6 +66,7 @@ public struct HotkeySpec: Equatable, Hashable, Sendable, Codable {
         case Key.six: return "6"
         case Key.h: return "H"
         case Key.r: return "R"
+        case Key.t: return "T"
         case Key.w: return "W"
         default: return "?"
         }
@@ -77,6 +79,8 @@ public enum HotkeyAction: String, CaseIterable, Sendable, Codable {
     case captureFullScreen
     case captureWindow
     case captureDelayed
+    case captureText
+    case captureScrolling
     case repeatLastArea
     case openHistory
 
@@ -86,6 +90,10 @@ public enum HotkeyAction: String, CaseIterable, Sendable, Codable {
         case .captureFullScreen: return "Capture full screen"
         case .captureWindow: return "Capture window"
         case .captureDelayed: return "Delayed capture (3s)"
+        case .captureText: return "Copy text from area"
+        // The same shortcut ends the run, because the app cannot hold the
+        // keyboard while the user is scrolling another window.
+        case .captureScrolling: return "Scrolling capture (press again to finish)"
         case .repeatLastArea: return "Repeat last area"
         case .openHistory: return "Open history"
         }
@@ -111,6 +119,12 @@ public enum HotkeyAction: String, CaseIterable, Sendable, Codable {
                               modifiers: HotkeySpec.controlKey | HotkeySpec.shiftKey)
         case .captureDelayed:
             return HotkeySpec(keyCode: HotkeySpec.Key.two,
+                              modifiers: HotkeySpec.controlKey | HotkeySpec.shiftKey)
+        case .captureText:
+            return HotkeySpec(keyCode: HotkeySpec.Key.t,
+                              modifiers: HotkeySpec.controlKey | HotkeySpec.shiftKey)
+        case .captureScrolling:
+            return HotkeySpec(keyCode: HotkeySpec.Key.five,
                               modifiers: HotkeySpec.controlKey | HotkeySpec.shiftKey)
         case .repeatLastArea:
             return HotkeySpec(keyCode: HotkeySpec.Key.r,

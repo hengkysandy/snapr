@@ -37,6 +37,9 @@ public struct Settings: Equatable, Sendable, Codable {
 
     public var defaultAnnotationColour: SRGB = SRGB(r: 255, g: 59, b: 48)
     public var defaultLineWidth: Int = 4
+    /// Starting size for a new text label, in image pixels. On a 2x capture
+    /// this reads at about the size of body text in the window underneath.
+    public var defaultFontSize: Int = 28
     /// Blur strength. Pixelation, not gaussian: MEASURED nowhere, but gaussian
     /// blur on text is reversible in principle and pixelation at a coarse block
     /// size is not, and this tool exists to hide things in screenshots.
@@ -46,6 +49,19 @@ public struct Settings: Equatable, Sendable, Codable {
         var h: [HotkeyAction: HotkeySpec] = [:]
         for a in HotkeyAction.allCases { h[a] = a.defaultSpec }
         self.hotkeys = h
+    }
+
+    /// Give any action added since this file was written its default shortcut.
+    ///
+    /// `hotkeys` is a stored dictionary, so a settings file from an older build
+    /// simply has no entry for a new action. Without this the new shortcut
+    /// silently does nothing for everyone who has already run the app, which is
+    /// exactly the people who would notice it was missing. A shortcut the user
+    /// has already changed is never touched.
+    public mutating func fillInMissingHotkeys() {
+        for action in HotkeyAction.allCases where hotkeys[action] == nil {
+            hotkeys[action] = action.defaultSpec
+        }
     }
 
     /// Conflicts inside our own set. macOS conflicts cannot be detected here,

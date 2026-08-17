@@ -25,13 +25,13 @@ the reason this app exists.
 |---|---|
 | Capture | area, fullscreen, active window, pick-a-window, delayed, repeat last area |
 | Selection | freeze frame, live dimensions, zoom loupe, arrow-key pixel nudge, edge snap, colour pick, live WCAG contrast |
-| Editor | arrow, box, text, step counter, blur, crop, undo/redo |
-| Output | clipboard, save as PNG, drag out to any app |
+| Editor | arrow, rectangle, text, counter, blur, highlight, crop, undo/redo |
+| Output | clipboard, save to Downloads, drag out to any app, copy the text |
 | Library | every capture stored encrypted, OCR'd in the background, full-text searchable |
 
 ### Deliberately out
 
-Scrolling capture and stitching, content-aware erase, S3 or any upload target,
+Content-aware erase, S3 or any upload target,
 magnifier callout, hand-drawn rendering, before/after GIF, video recording,
 iCloud sync (a free Apple account has no CloudKit).
 
@@ -399,10 +399,57 @@ strings index.db | grep <known>     # must return nothing
 A wrong key must **throw**, not return zero rows. An empty history looks exactly
 like data loss, and that failure has to be loud.
 
-### 6.4 Explicit saves are plain PNG
+### 6.4 Explicit saves are plain PNG, and never ask for a name
 
 The library is encrypted. `Cmd+S` to Downloads writes an ordinary PNG, because a
 file the user asked for is not the library.
+
+There is **no save panel**. Naming a screenshot is a decision nobody wants to
+make forty times a day, and the panel turned a one-key save into a dialogue, a
+folder to choose and a Return. `Cmd+S` writes the timestamped name straight to
+Downloads and closes the window.
+
+The panel was also the only thing that told the user where the file went, so
+removing it left a save that looked like nothing happening. A small floating
+panel now appears at the top centre of the screen for four seconds, naming the
+folder and the file, and clicking it reveals the file in the Finder. Top centre
+rather than top right, because the right is where system notifications land and
+a receipt underneath one is a receipt nobody reads.
+
+It is a floating panel rather than a system notification on purpose. A
+notification needs a permission the user may never have granted, can be
+silenced, and often arrives seconds late. A save confirmation that appears after
+the user has moved on is worse than none. It also takes `.nonactivatingPanel`,
+so the receipt never pulls focus away from whatever the user went back to.
+
+Removing the panel removed the thing that used to stop a collision, so
+`SaveName.deduplicated` puts it back. The name carries a timestamp down to the
+second, so a collision needs two saves inside the same second, which is exactly
+what pressing the shortcut twice produces. It counts up before the extension
+(`… 2.png`, not `….png 2`), because a name the Finder no longer sees as a PNG is
+its own bug. The rule takes an `isTaken` closure so it is tested without
+creating a single file.
+
+### 6.5 Escape ends the screenshot
+
+`Escape` copies to the clipboard and closes the window in one press, whatever
+`copyOnClose` says. `Cmd+W` means "close this" and whether it copies is a
+preference; `Escape` means "I am done with this screenshot", and the reason to
+be done with one is almost always to paste it somewhere.
+
+It is a short ladder rather than a single action, because two things have to be
+backed out of first:
+
+- **Text editing** takes `Escape` itself and commits the label. Losing what was
+  typed is worse than keeping something unwanted, which one more `Escape` then
+  discards.
+- **A pending crop** is cancelled. The rectangle is drawn but not applied, so
+  with no way to abandon it the only exits would be destroying pixels or losing
+  the whole window.
+
+Clearing the selection is deliberately **not** on that ladder. Every shape stays
+selected after it is drawn, so putting it there would make `Escape` appear to do
+nothing straight after the most common action in the editor.
 
 ---
 
@@ -463,6 +510,148 @@ hallucinate. Always on.
 
 Confirmed by re-running the whole probe under `sandbox-exec` with
 `(deny network*)`. Identical timings. No capture ever leaves the machine.
+
+### 7.6 Getting the text out, three ways
+
+Recognition ran on every capture from the start, but nothing exposed it except
+search. The text was sitting in the library and there was no way to read it.
+
+| Route | Source | Cost |
+|---|---|---|
+| `⌃⇧T`, drag a region | a fresh Vision pass | ~206 ms, the user is waiting |
+| `⇧⌘C` in the editor | a fresh pass on the flattened image | ~206 ms |
+| Right-click in the history | `shots.ocr_text`, already stored | a database read |
+
+The history route deliberately does **not** re-recognise. The text is already
+on the row, so a second pass would cost 206 ms and could disagree with what
+search has already indexed for that shot.
+
+The editor route reads the **flattened** image, not the original. That is a
+safety property, not a convenience: a blur over a password is pixelation, and
+reading the original would hand back the very text the user just hid. There is
+a test that blurs the word `SECRET` and asserts recognition cannot find it.
+
+**Three rules about the clipboard**, all in `TextGrab` in core so they are
+tested without Vision or a screen:
+
+1. **Nothing found means the clipboard is untouched.** Recognition on a
+   photograph returns nothing, and writing that nothing over what the user had
+   copied is a bad way to discover a feature failed. The function returns nil
+   rather than an empty string, so the caller cannot get this wrong by accident.
+2. **A barcode is a fallback, never an addition.** A QR code is worth copying
+   when the page has no text, and is an unexpected URL glued to the end of your
+   paragraph when it does.
+3. **A miss still gets a receipt.** Silence after a keystroke reads as a broken
+   shortcut. The user is told the clipboard was left alone.
+
+The receipt reports counts only and never repeats the recognised text back. A
+floating panel that paints the contents of a screenshot over whatever the user
+switched to would undo the point of the encrypted library. A test asserts a
+password in the recognised text never reaches the panel.
+
+A text grab is **not stored**. It never becomes a library row, gets no
+thumbnail and does not appear in the history. The user asked for some words, and
+keeping an encrypted picture of them is a surprise they did not ask for. That is
+also why the mode is a separate flag rather than a new `CaptureKind`: that enum
+is stored on every row and describes what a screenshot IS, so a case no stored
+shot can ever have does not belong in it.
+
+### 7.7 Adding a hotkey to a settings file that has already been written
+
+`Settings.hotkeys` is a stored dictionary, so a file written by an older build
+simply has no entry for a new action, and the new shortcut does nothing at all
+for everyone who has run the app before. `fillInMissingHotkeys` fills the gaps
+on load and never touches a shortcut the user has already changed. Confirmed on
+the running app: `registered 7 of 7` after the upgrade, not 6.
+
+---
+
+## 7.8 Scrolling capture
+
+### The user scrolls, not the app
+
+Driving the scroll from Snapr means posting synthetic scroll events, and macOS
+only lets a process post those if it holds the **Accessibility** grant. Snapr
+does not need Accessibility and says so in its README. Keeping that promise is
+worth asking the user to move two fingers.
+
+Everything else follows from that. The app cannot hold the keyboard during a
+run, because the window being scrolled needs it, so there is no Escape and no
+Return. The run ends by pressing the same shortcut again, or by clicking the
+panel that stays on screen throughout.
+
+### The offset search is over the whole overlap, not a band
+
+Every candidate offset is scored as the MEAN distance per overlapping row, over
+the entire overlap. Rows are compared through eight block sums of luma rather
+than pixel by pixel, which brings an ordinary region from 640 million operations
+to about five million, a few milliseconds.
+
+The first version matched a band of 24 rows near the top, which is the obvious
+and much cheaper design. **It failed on the first real page it saw.** A band of
+24 rows lands in the blank gap between two lines of text, and a blank gap is
+pixel-identical to every other blank gap. Dozens of offsets scored a perfect
+zero, the smallest won, and a 216 row scroll was recorded as 24. Eight lines of
+the document vanished at that seam and the row at the join was a blend of two
+different lines.
+
+Scoring the whole overlap makes a wrong offset disagree on every line of the
+frame instead of agreeing on one unlucky gap. MEASURED on the repetitive
+fixture: the true offset scores 0, the nearest rival 572.
+
+### Two gates, and the reason for each
+
+- **Ratio.** The runner-up must be at least three times worse. The truth
+  normally scores exactly zero, because a scrolled view blits its pixels rather
+  than redrawing them.
+- **Spread.** The gap must also be large next to the spread of all the scores.
+  On a page of one flat colour every offset scores about the same, the median
+  collapses onto the winner, and a gap of one unit would otherwise look like a
+  decisive win.
+
+"Nothing moved" is checked first and on its own terms, because a hand scrolls in
+bursts and pauses in between, and putting every pause through the ambiguity test
+would refuse most of them.
+
+### The minimum overlap is a third of the frame
+
+A candidate that leaves only a sliver in common can score a perfect zero by
+having almost nothing to disagree about. MEASURED with an eighth of the frame as
+the floor: a frame had TWO exact matches, the true offset and a two-line sliver
+elsewhere, so a frame it should have been sure about was refused.
+
+A third of the frame caps the scroll that can be followed at two thirds of the
+region per frame, about 5800 pixels a second. Past that the frame is refused,
+and **being refused is safe**: the next frame is measured against the last GOOD
+frame, so nothing is lost. A wrong match is not safe, so the floor is set for
+that rather than for speed.
+
+### Sticky bands
+
+A sticky header is harmless, because it is only ever taken from the first frame.
+A sticky FOOTER is the dangerous one: without detection it is pasted into the
+middle of the result once per frame, which reads as a toolbar stamped through
+the document. They are measured by identity in place on the first frame pair
+that really moved, capped at a quarter of the height each, and the footer is
+added back once at the end from the last frame.
+
+### The first frame is thrown away when it cannot be matched
+
+MEASURED on the running app: the first frame of a run is captured while the
+selection overlay is still dimming the screen. A dimmed frame never matches a
+clean one, and because a refused frame does not replace the reference, every
+later frame was refused too. **134 frames in, 133 refused, one frame out.**
+
+Two fixes, both kept. The first capture waits 300 ms, and `ScrollStitcher.isEmpty`
+lets the session tell that a frame which cannot be matched means the BASE is
+wrong while there is still nothing to lose.
+
+### Measured on a real page
+
+TextEdit, 400 numbered lines, a 1401x1091 region, scrolled by hand from the
+keyboard. Result 1401x2472 from 4 accepted frames. Every seam continuous, no
+line duplicated, none dropped, checked by reading the line numbers back out of
+the finished image.
 
 ---
 

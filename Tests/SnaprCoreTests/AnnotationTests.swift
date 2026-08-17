@@ -95,6 +95,64 @@ struct AnnotationStackTests {
     }
 }
 
+@Suite("Annotation kinds and shortcuts")
+struct AnnotationKindTests {
+
+    /// The editor picks tools by single keypress, so a duplicate letter means
+    /// one of the two tools is simply unreachable, and nothing would report it.
+    @Test("every kind has a distinct shortcut")
+    func shortcutsAreUnique() {
+        let shortcuts = Annotation.Kind.allCases.map(\.shortcut)
+        #expect(Set(shortcuts).count == shortcuts.count,
+                "duplicate shortcut in \(shortcuts)")
+    }
+
+    /// `x` is crop and `v` is select, both defined in the Mac target. The core
+    /// cannot see them, so this test states the reservation instead. Counter
+    /// took `c` from crop, which is exactly the kind of move that quietly
+    /// steals a key from another tool.
+    @Test("no kind uses a letter reserved by the editor's own tools")
+    func reservedLettersAreFree() {
+        let reserved: Set<String> = ["x", "v"]
+        for kind in Annotation.Kind.allCases {
+            #expect(!reserved.contains(kind.shortcut),
+                    "\(kind.rawValue) uses \(kind.shortcut), which crop or select owns")
+        }
+    }
+
+    @Test("the renamed tools keep the labels and keys the user asked for")
+    func renames() {
+        #expect(Annotation.Kind.box.label == "Rectangle")
+        #expect(Annotation.Kind.box.shortcut == "r")
+        #expect(Annotation.Kind.counter.label == "Counter")
+        #expect(Annotation.Kind.counter.shortcut == "c")
+    }
+
+    @Test("a rectangle is border only unless it is asked to be filled")
+    func fillStyleDefault() {
+        let a = Annotation(kind: .box, from: PixelPoint(x: 0, y: 0),
+                           to: PixelPoint(x: 10, y: 10))
+        #expect(a.fillStyle == .stroke)
+    }
+
+    @Test("fill style survives the JSON round trip, so it is not lost on reload")
+    func fillStyleCodable() throws {
+        var a = Annotation(kind: .box, from: PixelPoint(x: 0, y: 0),
+                           to: PixelPoint(x: 10, y: 10))
+        a.fillStyle = .filled
+        let back = try JSONDecoder().decode(Annotation.self, from: JSONEncoder().encode(a))
+        #expect(back.fillStyle == .filled)
+        #expect(back == a)
+    }
+
+    @Test("both fill styles have a label a user can read")
+    func fillStyleLabels() {
+        #expect(Annotation.FillStyle.stroke.label == "Border only")
+        #expect(Annotation.FillStyle.filled.label == "Filled")
+        #expect(Annotation.FillStyle.allCases.count == 2)
+    }
+}
+
 @Suite("Annotation hit testing")
 struct AnnotationHitTests {
 
@@ -235,6 +293,74 @@ struct ShotTests {
         #expect(name.hasSuffix(".png"))
         #expect(!name.contains("/"), "a slash in a filename silently creates a directory path")
         #expect(!name.contains(":"), "a colon is a path separator in the Finder's eyes")
+    }
+
+    // Saving no longer asks for a name, so nothing else stands between two
+    // saves in the same second and a file that quietly disappears.
+
+    @Test("only text uses the size slider for a font size")
+    func sizeControlPerKind() {
+        for kind in Annotation.Kind.allCases {
+            let expected: Annotation.SizeControl = kind == .text ? .fontSize : .lineWidth
+            #expect(kind.sizeControl == expected,
+                    "\(kind.rawValue) put the slider on the wrong number")
+        }
+    }
+
+    @Test("the two size ranges do not overlap at the ends, so the labels differ")
+    func sizeRangesAreDistinct() {
+        let width = Annotation.SizeControl.lineWidth.range
+        let font = Annotation.SizeControl.fontSize.range
+        // A hairline and a marker for lines, and readable to headline for type.
+        #expect(width.lowerBound == 1)
+        #expect(width.upperBound >= 40)
+        #expect(font.lowerBound >= 8, "type below 8 px is unreadable on a capture")
+        #expect(font.upperBound > width.upperBound,
+                "the text range has to reach further than the line range")
+    }
+
+    @Test("clamping keeps a value inside its own range")
+    func sizeClamping() {
+        #expect(Annotation.SizeControl.lineWidth.clamp(200) == 40)
+        #expect(Annotation.SizeControl.lineWidth.clamp(0) == 1)
+        #expect(Annotation.SizeControl.fontSize.clamp(200) == 160)
+        #expect(Annotation.SizeControl.fontSize.clamp(1) == 10)
+        // A value already inside comes back untouched.
+        #expect(Annotation.SizeControl.fontSize.clamp(28) == 28)
+    }
+
+    @Test("a free name is used exactly as it is")
+    func dedupLeavesAFreeNameAlone() {
+        #expect(SaveName.deduplicated("Snapr a.png") { _ in false } == "Snapr a.png")
+    }
+
+    @Test("a taken name gets a number before the extension, not after it")
+    func dedupNumbersBeforeTheExtension() {
+        let taken: Set<String> = ["Snapr a.png"]
+        let name = SaveName.deduplicated("Snapr a.png") { taken.contains($0) }
+        #expect(name == "Snapr a 2.png")
+        // The extension has to survive. "Snapr a.png 2" is not a PNG as far as
+        // the Finder, Preview or any upload form is concerned.
+        #expect(name.hasSuffix(".png"))
+    }
+
+    @Test("a run of taken names keeps counting rather than giving up")
+    func dedupCountsPastTheFirstFreeNumber() {
+        let taken: Set<String> = ["S.png", "S 2.png", "S 3.png", "S 4.png"]
+        #expect(SaveName.deduplicated("S.png") { taken.contains($0) } == "S 5.png")
+    }
+
+    @Test("a name with no extension is still numbered")
+    func dedupHandlesNoExtension() {
+        let taken: Set<String> = ["Snapr"]
+        #expect(SaveName.deduplicated("Snapr") { taken.contains($0) } == "Snapr 2")
+    }
+
+    @Test("a dotted folder name is not mistaken for an extension")
+    func dedupUsesTheLastDot() {
+        let taken: Set<String> = ["v1.2 shot.png"]
+        #expect(SaveName.deduplicated("v1.2 shot.png") { taken.contains($0) }
+                == "v1.2 shot 2.png")
     }
 }
 

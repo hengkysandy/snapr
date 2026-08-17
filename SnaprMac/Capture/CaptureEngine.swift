@@ -117,6 +117,32 @@ final class CaptureEngine {
 
     func captureFullScreen(_ screen: NSScreen) async throws -> CGImage {
         let started = CFAbsoluteTimeGetCurrent()
+        let image = try await grabScreen(
+            screen, showsCursor: SettingsStore.shared.settings.showCursorInCapture)
+        Log.capture.info("""
+            fullScreen \(image.width, privacy: .public)x\(image.height, privacy: .public) \
+            in \(Redact.ms(CFAbsoluteTimeGetCurrent() - started), privacy: .public)
+            """)
+        return image
+    }
+
+    /// One frame of a scroll run.
+    ///
+    /// Quiet, because this is called about eight times a second and a log line
+    /// per frame would bury everything else in the log for the whole run. Never
+    /// shows the cursor either, whatever the setting says: a pointer stitched
+    /// into the middle of a long page is a mark the user cannot remove.
+    ///
+    /// It grabs the whole screen and the caller crops, rather than using
+    /// `sourceRect`. That wastes a few milliseconds per frame and it is a
+    /// deliberate trade: this is the exact code path that is already proven end
+    /// to end, and a mis-specified source rectangle would silently capture the
+    /// wrong part of the screen.
+    func captureFrame(_ screen: NSScreen) async throws -> CGImage {
+        try await grabScreen(screen, showsCursor: false)
+    }
+
+    private func grabScreen(_ screen: NSScreen, showsCursor: Bool) async throws -> CGImage {
         let displays = try await shareableDisplays()
         guard let display = Self.match(screen, in: displays) ?? displays.first else {
             throw CaptureError.noDisplay
@@ -124,7 +150,7 @@ final class CaptureEngine {
         let scale = Int(screen.backingScaleFactor.rounded())
         let cfg = Self.configuration(pixelWidth: display.width * scale,
                                      pixelHeight: display.height * scale,
-                                     showsCursor: SettingsStore.shared.settings.showCursorInCapture)
+                                     showsCursor: showsCursor)
         let filter = SCContentFilter(display: display, excludingWindows: [])
 
         let image: CGImage
@@ -136,10 +162,6 @@ final class CaptureEngine {
         if let reason = Self.blankFrameReason(image) {
             throw CaptureError.blankFrame(reason)
         }
-        Log.capture.info("""
-            fullScreen \(image.width, privacy: .public)x\(image.height, privacy: .public) \
-            in \(Redact.ms(CFAbsoluteTimeGetCurrent() - started), privacy: .public)
-            """)
         return image
     }
 

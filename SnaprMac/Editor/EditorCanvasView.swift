@@ -26,8 +26,17 @@ final class EditorCanvasView: NSView, NSTextViewDelegate, NSDraggingSource {
         }
     }
 
+    // The three attributes the toolbar controls. With nothing selected these
+    // are the defaults for the next annotation. With something selected the
+    // toolbar edits that annotation as well, through the `apply` functions
+    // below, so one control never means two different things at once.
     var colour: SRGB
     var lineWidth: Int
+    /// Text size. A separate default from `lineWidth` because the slider means
+    /// one or the other depending on what is selected, and squeezing both into
+    /// one number would make picking a 28 pixel type size set a 28 pixel line.
+    var fontSize: Int
+    var fillStyle: Annotation.FillStyle = .stroke
     var blockSize: Int
 
     private(set) var zoom: CGFloat = 1
@@ -36,12 +45,16 @@ final class EditorCanvasView: NSView, NSTextViewDelegate, NSDraggingSource {
 
     /// The command shortcuts the canvas cannot answer on its own, because they
     /// touch the pasteboard, the file system or the window.
-    enum Command: Sendable { case copy, save, close }
+    enum Command: Sendable { case copy, copyText, save, close, copyAndClose }
 
     var onZoomChanged: ((CGFloat) -> Void)?
     var onToolChanged: ((EditorTool) -> Void)?
     var onImageChanged: ((PixelSize) -> Void)?
     var onUndoStateChanged: (() -> Void)?
+    /// Fires when the selection, or the style of the selected annotation,
+    /// changes. Nil means nothing is selected. The toolbar follows this so it
+    /// always shows what the next change will do.
+    var onSelectionChanged: ((Annotation?) -> Void)?
     /// Returns true when the command was handled.
     var onCommand: ((Command) -> Bool)?
     /// Filename used for a drag out of the window. Set by the controller so the
@@ -53,6 +66,11 @@ final class EditorCanvasView: NSView, NSTextViewDelegate, NSDraggingSource {
     var annotations: [Annotation] { stack.annotations }
     var canUndo: Bool { stack.canUndo }
     var canRedo: Bool { stack.canRedo }
+
+    var selectedAnnotation: Annotation? {
+        guard let id = selectedID else { return nil }
+        return annotation(id)
+    }
 
     private var imageBounds: PixelRect {
         PixelRect.xywh(0, 0, image.width, image.height)
@@ -83,8 +101,14 @@ final class EditorCanvasView: NSView, NSTextViewDelegate, NSDraggingSource {
     /// the drag actually changes something, so a plain click does not leave an
     /// empty undo step behind.
     private var interactiveStarted = false
+    /// The same rule for the width slider: one checkpoint per drag of the knob,
+    /// and only once the value has really changed.
+    private var widthDragCheckpointed = false
 
-    private var textView: NSTextView?
+    // Internal rather than private so a test can type into it. Faking the
+    // typing instead would test the fake, and the bug this file has had twice
+    // is about what happens when real editing ENDS.
+    var textView: NSTextView?
     private var editingID: UUID?
     /// `NSFilePromiseProvider` holds its delegate weakly, so the drag would
     /// produce an empty file if nothing else kept this alive.
@@ -102,6 +126,7 @@ final class EditorCanvasView: NSView, NSTextViewDelegate, NSDraggingSource {
         self.image = image
         self.colour = settings.defaultAnnotationColour
         self.lineWidth = settings.defaultLineWidth
+        self.fontSize = Annotation.SizeControl.fontSize.clamp(settings.defaultFontSize)
         self.blockSize = settings.blurBlockSize
         super.init(frame: NSRect(x: 0, y: 0, width: image.width, height: image.height))
         wantsLayer = true
@@ -138,7 +163,27 @@ final class EditorCanvasView: NSView, NSTextViewDelegate, NSDraggingSource {
         // The y flip: a view point measures up from the bottom, an image pixel
         // measures down from the top edge of the image.
         let py = (r.maxY - p.y) / zoom
-        return PixelPoint(x: Int(px.rounded(.down)), y: Int(py.rounded(.down)))
+        // CLAMPED to the image, and this is a bug fix rather than tidiness.
+        //
+        // The editor window is bigger than the image, so there is grey canvas
+        // around it that looks perfectly drawable. Without this clamp a
+        // negative or oversized pixel was accepted, the annotation was stored
+        // happily, drawn happily on screen, and then SILENTLY DISCARDED on
+        // save, because `flatten` renders into a context exactly the size of
+        // the image. The user lost work and nothing said so. Reported from real
+        // use: three counters and two arrows drawn above the picture were in
+        // the editor and absent from the saved PNG.
+        return PixelPoint(x: clampToImage(px, limit: image.width),
+                          y: clampToImage(py, limit: image.height))
+    }
+
+    private func clampToImage(_ value: CGFloat, limit: Int) -> Int {
+        // `limit - 1` because a pixel index is the last addressable pixel, not
+        // the width. Using `limit` would let an annotation sit one column past
+        // the right edge, which is exactly the off-by-one this clamp exists to
+        // stop.
+        guard value.isFinite else { return 0 }
+        return min(max(Int(value.rounded(.down)), 0), max(0, limit - 1))
     }
 
     /// Image pixel to view point. Returns the pixel's top-left corner, which is
@@ -284,9 +329,135 @@ final class EditorCanvasView: NSView, NSTextViewDelegate, NSDraggingSource {
         if let id = selectedID, annotation(id) == nil { selectedID = nil }
     }
 
+    /// What the toolbar was last told about. Kept so the toolbar is only
+    /// refreshed when something it shows really moved, which is what stops a
+    /// slider drag from writing its own rounded value back into itself.
+    private var lastReported: Annotation?
+
     private func finishedChange() {
+        reportSelectionIfChanged()
         onUndoStateChanged?()
         needsDisplay = true
+    }
+
+    private func reportSelectionIfChanged() {
+        let now = selectedAnnotation
+        // Only the three things the toolbar shows. Position and text change on
+        // every step of a move and would make this fire hundreds of times.
+        let same = now?.id == lastReported?.id
+            && now?.colour == lastReported?.colour
+            && now?.lineWidth == lastReported?.lineWidth
+            && now?.fillStyle == lastReported?.fillStyle
+        guard !same else { return }
+        lastReported = now
+        onSelectionChanged?(now)
+    }
+
+    // MARK: - Style edits from the toolbar
+    //
+    // Each one sets the default for the next annotation AND, if something is
+    // selected, changes that annotation too. The user picked the colour while
+    // looking at the selection, so the next shape should use it as well.
+
+    func applyColour(_ newColour: SRGB) {
+        colour = newColour
+        guard var a = selectedAnnotation, a.colour != newColour else { return }
+        a.colour = newColour
+        stack.update(a)
+        Log.editor.debug("annotation recoloured, kind \(a.kind.rawValue, privacy: .public)")
+        finishedChange()
+    }
+
+    func applyFillStyle(_ newStyle: Annotation.FillStyle) {
+        fillStyle = newStyle
+        guard var a = selectedAnnotation, a.fillStyle != newStyle else { return }
+        a.fillStyle = newStyle
+        stack.update(a)
+        Log.editor.debug("annotation fill set to \(newStyle.rawValue, privacy: .public)")
+        finishedChange()
+    }
+
+    /// What the one size slider means right now. Read from the same place the
+    /// toolbar reads it, so the two cannot disagree about which number the
+    /// knob is holding.
+    var sizeControl: Annotation.SizeControl {
+        if let kind = selectedAnnotation?.kind { return kind.sizeControl }
+        if case .annotate(let kind) = tool { return kind.sizeControl }
+        return .lineWidth
+    }
+
+    /// Line width, or text size, including the middle of a slider drag.
+    ///
+    /// A drag sends dozens of values. Only the first one that really changes
+    /// something takes a checkpoint, so undoing the whole drag is one Cmd+Z.
+    /// Nothing extra happens on mouse up, and a click that never moves the knob
+    /// leaves no undo step at all.
+    func applySize(_ value: Int, phase: SliderPhase) {
+        let control = sizeControl
+        let clamped = control.clamp(value)
+
+        switch control {
+        case .lineWidth: lineWidth = clamped
+        case .fontSize: fontSize = clamped
+        }
+        if phase == .dragBegan { widthDragCheckpointed = false }
+
+        // While a label is open, the live text view has to follow the slider as
+        // well. Otherwise the type only jumps to its new size on commit, and
+        // choosing a size by eye is impossible.
+        if control == .fontSize { resizeOpenTextView(to: clamped) }
+
+        guard var a = selectedAnnotation else { return }
+        switch control {
+        case .lineWidth:
+            guard a.lineWidth != clamped else { return }
+            a.lineWidth = clamped
+        case .fontSize:
+            guard a.fontSize != clamped else { return }
+            a.fontSize = clamped
+            // The box has to follow the type, or the selection outline and the
+            // hit test end up describing a rectangle that is no longer there.
+            refitText(&a)
+        }
+
+        switch phase {
+        case .single:
+            stack.update(a)
+        case .dragBegan, .dragContinued:
+            if !widthDragCheckpointed {
+                stack.beginInteractive()
+                widthDragCheckpointed = true
+            }
+            stack.updateInteractive(a)
+        }
+        finishedChange()
+    }
+
+    /// Fit a text annotation's box to what will actually be drawn.
+    ///
+    /// Shared by the size slider and by the end of editing, because a box that
+    /// disagrees with the glyphs is the same bug either way. The slack stops
+    /// CoreText dropping the last line on a rounding boundary.
+    private func refitText(_ a: inout Annotation) {
+        guard a.kind == .text else { return }
+        // While the label is open the live string is in the text view, not yet
+        // in the annotation.
+        let string = (editingID == a.id ? textView?.string : nil) ?? a.text
+        let measured = AnnotationRenderer.textSize(string,
+                                                   fontSize: a.fontSize,
+                                                   maxWidth: 640)
+        a.to = PixelPoint(x: a.from.x + measured.width + 8,
+                          y: a.from.y + measured.height + 6)
+    }
+
+    private func resizeOpenTextView(to newSize: Int) {
+        guard let tv = textView, let id = editingID, var a = annotation(id) else { return }
+        tv.font = NSFont.systemFont(ofSize: CGFloat(newSize) * zoom, weight: .semibold)
+        a.fontSize = newSize
+        refitText(&a)
+        let box = viewRect(from: a.boundingBox)
+        tv.frame = NSRect(x: box.minX, y: box.minY,
+                          width: max(80, box.width), height: max(24, box.height))
     }
 
     private func annotation(_ id: UUID) -> Annotation? {
@@ -347,11 +518,6 @@ final class EditorCanvasView: NSView, NSTextViewDelegate, NSDraggingSource {
         window?.makeFirstResponder(self)
         let viewPoint = convert(event.locationInWindow, from: nil)
         let pixel = imagePixel(from: viewPoint)
-
-        // A click anywhere else ends text editing, which is what people expect
-        // from a floating text field.
-        if textView != nil { commitTextEditing() }
-
         beginDrag(at: pixel, viewPoint: viewPoint, clickCount: event.clickCount)
     }
 
@@ -380,6 +546,15 @@ final class EditorCanvasView: NSView, NSTextViewDelegate, NSDraggingSource {
 
     func beginDrag(at pixel: PixelPoint, viewPoint: CGPoint = .zero, clickCount: Int = 1) {
         interactiveStarted = false
+
+        // A click anywhere else ends text editing, which is what anyone expects
+        // from a floating text field. The click is then SPENT and does nothing
+        // else. Before this it also started a second text box, so finishing one
+        // caption immediately began the next one and the chain never ended.
+        if isEditingText {
+            endTextEditing()
+            return
+        }
 
         switch tool {
         case .crop:
@@ -420,8 +595,12 @@ final class EditorCanvasView: NSView, NSTextViewDelegate, NSDraggingSource {
         switch drag {
         case .creatingPending(let kind, let anchor):
             guard pixel != anchor else { return }
+            // Only a rectangle can be filled, so nothing else is given a fill
+            // style. Storing one on an arrow would be a value that never means
+            // anything and that a future reader has to check.
             let a = Annotation(kind: kind, from: anchor, to: pixel,
-                               colour: colour, lineWidth: lineWidth)
+                               colour: colour, lineWidth: lineWidth,
+                               fillStyle: kind == .box ? fillStyle : .stroke)
             // One `add` is one checkpoint. Every step after this is
             // interactive, so the whole drag is a single undo step.
             stack.add(a)
@@ -503,7 +682,6 @@ final class EditorCanvasView: NSView, NSTextViewDelegate, NSDraggingSource {
     }
 
     private func createText(at pixel: PixelPoint) {
-        let fontSize = 28
         let a = Annotation(kind: .text,
                            from: pixel,
                            to: PixelPoint(x: pixel.x + 240, y: pixel.y + fontSize * 2),
@@ -561,14 +739,7 @@ final class EditorCanvasView: NSView, NSTextViewDelegate, NSDraggingSource {
             if selectedID == id { selectedID = nil }
         } else {
             a.text = string
-            // Fit the box to what will actually be drawn, so the selection
-            // outline and the hit test agree with what is on screen. The slack
-            // stops CoreText dropping the last line on a rounding boundary.
-            let measured = AnnotationRenderer.textSize(string,
-                                                       fontSize: a.fontSize,
-                                                       maxWidth: 640)
-            a.to = PixelPoint(x: a.from.x + measured.width + 8,
-                              y: a.from.y + measured.height + 6)
+            refitText(&a)
             stack.update(a)
         }
         // The string itself is user content and is never logged.
@@ -581,11 +752,26 @@ final class EditorCanvasView: NSView, NSTextViewDelegate, NSDraggingSource {
         // worse than keeping it. Return inserts a newline, so a label can be
         // more than one line.
         if selector == #selector(NSResponder.cancelOperation(_:)) {
-            commitTextEditing()
+            endTextEditing()
             window?.makeFirstResponder(self)
             return true
         }
         return false
+    }
+
+    var isEditingText: Bool { textView != nil }
+
+    /// Finish the label and go back to the idle tool.
+    ///
+    /// Staying on the text tool is what made one caption turn into a chain of
+    /// empty ones: the click or the Escape that ended a label was also the
+    /// click that started the next. Text is the only tool that behaves this
+    /// way, because it is the only one that takes over the keyboard, so the
+    /// user cannot simply press another letter to get out.
+    func endTextEditing() {
+        commitTextEditing()
+        // After the commit, so the `tool` observer's own commit is a no-op.
+        tool = .select
     }
 
     // MARK: - Keyboard
@@ -604,9 +790,20 @@ final class EditorCanvasView: NSView, NSTextViewDelegate, NSDraggingSource {
             deleteSelected()
             return
         case 53:                            // Escape
-            cropRect = nil
-            selectedID = nil
-            finishedChange()
+            // Escape is "I am done": it copies the result and closes the
+            // window, which is the ending almost every screenshot has.
+            //
+            // A pending crop is the one thing it backs out of first. A crop
+            // rectangle is drawn but not applied, and having no way to abandon
+            // it except by destroying pixels or losing the whole window would
+            // be worse than needing a second press. Text editing never reaches
+            // here: the text view takes Escape itself and commits.
+            if cropRect != nil {
+                cropRect = nil
+                finishedChange()
+                return
+            }
+            _ = onCommand?(.copyAndClose)
             return
         case 36, 76:                        // Return, Enter
             applyPendingCrop()
@@ -659,7 +856,9 @@ final class EditorCanvasView: NSView, NSTextViewDelegate, NSDraggingSource {
             zoomToFit()
             return true
         case "c":
-            return onCommand?(.copy) ?? false
+            // Shift makes it the text rather than the image, the same way
+            // Shift turns Copy into Copy as Plain Text elsewhere on the Mac.
+            return onCommand?(shift ? .copyText : .copy) ?? false
         case "s":
             return onCommand?(.save) ?? false
         case "w":

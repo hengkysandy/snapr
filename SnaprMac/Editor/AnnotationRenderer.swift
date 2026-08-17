@@ -125,10 +125,23 @@ enum AnnotationRenderer {
 
     private static func drawBox(_ a: Annotation, in ctx: CGContext) {
         let lw = CGFloat(max(1, a.lineWidth))
+        let full = cgRect(a.boundingBox)
+        guard full.width > 0, full.height > 0 else { return }
+
+        if a.fillStyle == .filled {
+            // A filled rectangle covers what is under it, so it doubles as a
+            // way to hide something with a solid block rather than a blur.
+            ctx.saveGState()
+            ctx.setFillColor(cgColour(a.colour))
+            ctx.fill(full)
+            ctx.restoreGState()
+            return
+        }
+
         // Inset by half the line width so the stroke stays inside the rectangle
         // the user dragged. Without this the box is fatter than the selection
         // and hit testing disagrees with what is on screen.
-        let r = cgRect(a.boundingBox).insetBy(dx: lw / 2, dy: lw / 2)
+        let r = full.insetBy(dx: lw / 2, dy: lw / 2)
         guard r.width > 0, r.height > 0 else { return }
         ctx.saveGState()
         ctx.setStrokeColor(cgColour(a.colour))
@@ -198,13 +211,25 @@ enum AnnotationRenderer {
     private static func drawCounter(_ a: Annotation, in ctx: CGContext) {
         let box = cgRect(a.boundingBox)
         let side = min(box.width, box.height)
-        guard side >= 4 else { return }
-        let circle = CGRect(x: box.midX - side / 2, y: box.midY - side / 2,
-                            width: side, height: side)
+        guard side >= 6 else { return }
+        // The balloon is bigger than its circle, because the tail reaches out
+        // to 1.95 radii. Size the circle so the WHOLE shape fits the rectangle
+        // the user dragged. Letting the tail hang outside would make hit
+        // testing disagree with what is drawn, and would clip the tip at the
+        // image edge, which is the same class of bug as annotations drawn
+        // outside the picture vanishing on save.
+        let r = side / balloonExtent
+        let circle = CGRect(x: box.minX + balloonTailReach * r - r,
+                            y: box.minY,
+                            width: 2 * r, height: 2 * r)
 
+        // A speech balloon, not a plain circle. The tail points at the thing
+        // being numbered, which is the whole job of a step marker: a bare
+        // circle sitting near two controls does not say which one it means.
         ctx.saveGState()
         ctx.setFillColor(cgColour(a.colour))
-        ctx.fillEllipse(in: circle)
+        ctx.addPath(balloonPath(circle))
+        ctx.fillPath()
         ctx.restoreGState()
 
         // Whichever of black or white has the better WCAG ratio against the
@@ -212,7 +237,9 @@ enum AnnotationRenderer {
         let label = Contrast.ratio(a.colour, .white) >= Contrast.ratio(a.colour, .black)
             ? SRGB.white : SRGB.black
         let text = String(max(1, a.counterValue))
-        let fontSize = side * 0.55
+        // Sized from the CIRCLE, not from the drag box. The circle is now
+        // smaller than the box, because the tail takes some of it.
+        let fontSize = circle.width * 0.55
         let line = CTLineCreateWithAttributedString(
             attributed(text, fontSize: fontSize, colour: label))
 
@@ -230,6 +257,41 @@ enum AnnotationRenderer {
         CTLineDraw(line, ctx)
         ctx.restoreGState()
     }
+
+    /// A circle with a tail at the bottom left, drawn as one closed path.
+    ///
+    /// The context is in the image's TOP-LEFT pixel space, so a larger y is
+    /// further DOWN the picture. The tail therefore points to a larger y.
+    static func balloonPath(_ circle: CGRect) -> CGPath {
+        let r = circle.width / 2
+        let c = CGPoint(x: circle.midX, y: circle.midY)
+        let path = CGMutablePath()
+        let tip = CGPoint(x: c.x + r * balloonTailReach * cos(balloonGapCentre),
+                          y: c.y + r * balloonTailReach * sin(balloonGapCentre))
+
+        // Sweep the LONG way round, leaving only the gap the tail fills.
+        // Sweeping the short way draws a thin sliver instead of a balloon,
+        // which is what the first attempt did, and it was only obvious once it
+        // had been rendered and looked at.
+        path.addArc(center: c, radius: r,
+                    startAngle: balloonGapCentre + balloonGapHalfWidth,
+                    endAngle: balloonGapCentre - balloonGapHalfWidth + 2 * .pi,
+                    clockwise: false)
+        path.addLine(to: tip)
+        path.closeSubpath()
+        return path
+    }
+
+    /// Where the tail points. The context is in the image's TOP-LEFT pixel
+    /// space, so +y is DOWN and 0.75 pi is down and to the left.
+    static let balloonGapCentre = CGFloat.pi * 0.75
+    /// Half the angular width of the gap the tail fills.
+    static let balloonGapHalfWidth = CGFloat.pi * 0.16
+    /// How far the tip sits from the centre, in radii.
+    static let balloonTailReach: CGFloat = 1.95
+    /// Total width and height of the balloon, in radii. The tail adds
+    /// `balloonTailReach * cos(45 degrees)` on one side of each axis.
+    static let balloonExtent: CGFloat = 1 + balloonTailReach * 0.7071
 
     // MARK: - Text
 

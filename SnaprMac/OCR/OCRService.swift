@@ -180,10 +180,22 @@ final class OCRService {
         case imageDecodeFailed
     }
 
-    private struct Recognition {
+    struct Recognition {
         var text: String
         var lineCount: Int
         var barcodes: [String]
+    }
+
+    /// Read one image right now, for a user who is waiting.
+    ///
+    /// Separate from `enqueue`, which is the background queue that fills the
+    /// search index. That queue exists so a capture never blocks; this is the
+    /// opposite case, where the user pressed a key and expects the clipboard to
+    /// change. It deliberately does not take the `isProcessing` lock: a
+    /// 206 ms pass the user asked for should not wait behind a background one
+    /// they never knew about.
+    nonisolated static func text(in image: CGImage) async throws -> Recognition {
+        try await recognise(image)
     }
 
     /// One `ImageRequestHandler`, two requests.

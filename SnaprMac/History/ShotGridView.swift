@@ -40,6 +40,7 @@ final class ShotGridView: NSView, NSCollectionViewDataSource, NSCollectionViewDe
     enum Command {
         case open
         case copy
+        case copyText
         case saveCopy
         case delete
     }
@@ -200,6 +201,7 @@ final class ShotGridView: NSView, NSCollectionViewDataSource, NSCollectionViewDe
         // sealed, so revealing them shows a file nothing can open.
         for (title, command) in [("Open", Command.open),
                                  ("Copy", Command.copy),
+                                 ("Copy Text", Command.copyText),
                                  ("Save a Copy...", Command.saveCopy)] {
             let item = NSMenuItem(title: title, action: #selector(runMenuCommand(_:)), keyEquivalent: "")
             item.target = self

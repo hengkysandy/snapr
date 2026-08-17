@@ -247,6 +247,7 @@ final class HistoryWindowController: NSWindowController, NSSearchFieldDelegate {
         switch command {
         case .open: onOpen?(id)
         case .copy: copyToPasteboard(id)
+        case .copyText: copyText(id)
         case .saveCopy: saveCopy(id)
         case .delete: confirmDelete(id)
         }
@@ -262,6 +263,34 @@ final class HistoryWindowController: NSWindowController, NSSearchFieldDelegate {
         } catch {
             alert(error: error, doing: "copy that screenshot")
         }
+    }
+
+    /// Copy the text that was already recognised for this shot.
+    ///
+    /// No Vision pass here. Every capture is read in the background and the
+    /// result is stored on the row, so this is a read from the library and it
+    /// is instant. Running recognition again would cost 206 ms and could
+    /// disagree with what search already indexed.
+    private func copyText(_ id: UUID) {
+        guard let shot = grid.shots.first(where: { $0.id == id }) else { return }
+        // A shot whose recognition has not finished has no text yet, and
+        // pretending it simply has none would be a lie the user cannot see.
+        guard shot.ocrState != .pending, shot.ocrState != .running else {
+            Toast.shared.show(Toast.Content(title: "Still reading that one",
+                                            detail: "Recognition has not finished yet",
+                                            symbol: "clock",
+                                            tint: .systemOrange))
+            return
+        }
+        let grab = TextGrab.clipboard(text: shot.ocrText, barcodes: shot.barcodePayloads)
+        if let grab {
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(grab.text, forType: .string)
+        }
+        // Counts only. The recognised text is the contents of the user's screen.
+        Log.library.info("copied text from one shot, \(grab?.lines ?? 0, privacy: .public) lines")
+        Toast.shared.showTextGrab(grab, on: window?.screen)
     }
 
     /// An explicit save writes a plain PNG. The library is encrypted, but a file
