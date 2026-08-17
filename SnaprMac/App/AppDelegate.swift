@@ -340,6 +340,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scrollSession = session
 
         hud.onDone = { [weak session] in session?.stop() }
+        hud.onToggleDrive = { [weak self] in self?.toggleScrollDrive() }
+        session.onDriveChanged = { [weak hud] drive in
+            hud?.setDrive(automatic: drive == .automatic)
+        }
         hud.onCancel = { [weak self] in
             self?.scrollSession = nil
             self?.scrollHUD?.close()
@@ -371,7 +375,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         hud.show(on: screen)
+        // Automatic when macOS will already deliver our scrolls, and by hand
+        // otherwise. Nobody is asked for a permission they have not reached for
+        // yet; the button on the panel is where that request lives.
+        hud.setDrive(automatic: session.setDrive(.automatic))
         session.start()
+    }
+
+    /// The Auto scroll button on the capture panel.
+    ///
+    /// Automatic scrolling is the ONE thing in Snapr that needs the
+    /// Accessibility grant, because macOS only delivers synthetic scroll events
+    /// from a trusted process. Asking here, at the moment the user reaches for
+    /// it, rather than at launch: everything else in the app works without it,
+    /// and a permission dialogue on first run for a feature nobody has asked
+    /// for is how people learn to dismiss dialogues.
+    private func toggleScrollDrive() {
+        guard let session = scrollSession else { return }
+        if session.drive == .automatic {
+            session.setDrive(.manual)
+            return
+        }
+        if session.setDrive(.automatic) { return }
+
+        // Not trusted. Ask, and say plainly what the app will do with it.
+        AutoScroller.requestTrust()
+        let alert = NSAlert()
+        alert.messageText = "Snapr needs Accessibility to scroll for you"
+        alert.informativeText = """
+            macOS only lets an app scroll another window if it is turned on \
+            under Privacy & Security, Accessibility.
+
+            Snapr uses it for one thing: sending scroll events during a \
+            scrolling capture. It does not read other apps and does not watch \
+            what you type.
+
+            You can also just scroll the window yourself, which needs no \
+            permission at all.
+            """
+        alert.addButton(withTitle: "Open Settings")
+        alert.addButton(withTitle: "I'll scroll myself")
+        alert.alertStyle = .informational
+        if alert.runModal() == .alertFirstButtonReturn {
+            AutoScroller.openAccessibilitySettings()
+        }
     }
 
     /// Read the text in a region and put it on the clipboard. Nothing is stored.

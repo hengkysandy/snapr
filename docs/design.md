@@ -568,17 +568,40 @@ the running app: `registered 7 of 7` after the upgrade, not 6.
 
 ## 7.8 Scrolling capture
 
-### The user scrolls, not the app
+### Who scrolls, and the one permission in the app
 
-Driving the scroll from Snapr means posting synthetic scroll events, and macOS
-only lets a process post those if it holds the **Accessibility** grant. Snapr
-does not need Accessibility and says so in its README. Keeping that promise is
-worth asking the user to move two fingers.
+Driving the scroll means posting synthetic scroll events, and macOS only lets a
+process post those if it holds the **Accessibility** grant.
 
-Everything else follows from that. The app cannot hold the keyboard during a
-run, because the window being scrolled needs it, so there is no Escape and no
-Return. The run ends by pressing the same shortcut again, or by clicking the
-panel that stays on screen throughout.
+Manual scrolling is therefore the baseline and needs nothing. Automatic
+scrolling is offered as a button on the capture panel, which asks for the grant
+the first time it is pressed, explains that it is used for scroll events and
+nothing else, and falls back to manual if refused. Nobody is asked at launch for
+a permission they have not reached for, because a dialogue on first run for a
+feature nobody wanted is how people learn to dismiss dialogues.
+
+Automatic scrolling can do one thing a hand cannot be asked about: it knows when
+it has reached the bottom, because it scrolled and the page did not move. Three
+unchanged frames in a row end the run. Three, not one, because a single
+unchanged frame usually means the app has not finished redrawing.
+
+The app cannot hold the keyboard during a run either way, because the window
+being scrolled needs it, so there is no Escape and no Return. The run ends by
+pressing the same shortcut again, or by clicking the panel.
+
+### The capture must not contain Snapr
+
+MEASURED on a real capture of a web page: the panel that reports the height sits
+over the screen for the whole run, so it landed in every frame and was stitched
+in again and again. The finished image had "0 px", "1273 px captured" and
+"1507 px captured" stamped down the middle of it.
+
+Every capture now excludes Snapr's own windows through `SCContentFilter`. The
+whole application rather than the one panel, because the same would happen to
+any window the app puts on screen, and a screenshot of Snapr is never what
+anyone wants. One `SCShareableContent` fetch serves both the display and the
+window list, because fetching it twice doubled the slowest part of a capture
+that runs eight times a second.
 
 ### The offset search is over the whole overlap, not a band
 

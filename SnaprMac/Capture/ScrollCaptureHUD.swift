@@ -15,13 +15,17 @@ final class ScrollCaptureHUD {
 
     var onDone: (() -> Void)?
     var onCancel: (() -> Void)?
+    /// Asks to switch between scrolling by hand and letting the app do it.
+    var onToggleDrive: (() -> Void)?
 
     private var panel: NSPanel?
     private let heightLabel = NSTextField(labelWithString: "0 px")
     private let hintLabel = NSTextField(labelWithString: "Scroll the window you want to capture")
+    private let driveButton = NSButton()
+    private var automatic = false
 
     func show(on screen: NSScreen) {
-        let size = NSSize(width: 320, height: 92)
+        let size = NSSize(width: 400, height: 92)
         let panel = NSPanel(contentRect: NSRect(origin: .zero, size: size),
                             styleMask: [.borderless, .nonactivatingPanel],
                             backing: .buffered, defer: false)
@@ -50,12 +54,32 @@ final class ScrollCaptureHUD {
 
     func update(height: Int, lost: Int) {
         heightLabel.stringValue = "\(height) px captured"
-        // Only mentioned when it happens. A permanent "0 skipped" would make a
-        // healthy run look like it was going wrong.
-        hintLabel.stringValue = lost == 0
-            ? "Scroll the window you want to capture"
-            : "\(lost) frame\(lost == 1 ? "" : "s") skipped, keep scrolling slowly"
-        hintLabel.textColor = lost == 0 ? .secondaryLabelColor : .systemOrange
+        // The skipped count is only mentioned when it happens. A permanent
+        // "0 skipped" would make a healthy run look like it was going wrong.
+        if lost > 0 {
+            hintLabel.stringValue = automatic
+                ? "\(lost) frame\(lost == 1 ? "" : "s") skipped"
+                : "\(lost) frame\(lost == 1 ? "" : "s") skipped, keep scrolling slowly"
+            hintLabel.textColor = .systemOrange
+        } else {
+            hintLabel.stringValue = automatic
+                ? "Scrolling for you, stops at the end of the page"
+                : "Scroll the window you want to capture"
+            hintLabel.textColor = .secondaryLabelColor
+        }
+    }
+
+    func setDrive(automatic: Bool) {
+        self.automatic = automatic
+        driveButton.title = automatic ? "I'll scroll" : "Auto scroll"
+        driveButton.toolTip = automatic
+            ? "Stop scrolling for me and let me scroll it myself"
+            : "Let Snapr scroll the window (needs Accessibility permission)"
+        update(height: currentHeight, lost: 0)
+    }
+
+    private var currentHeight: Int {
+        Int(heightLabel.stringValue.split(separator: " ").first.flatMap { Int($0) } ?? 0)
     }
 
     func close() {
@@ -102,7 +126,13 @@ final class ScrollCaptureHUD {
         // set here would do nothing at all, and a button that looks like the
         // default and ignores Return is worse than one that plainly does not.
 
-        let buttons = NSStackView(views: [NSView(), cancel, done])
+        driveButton.title = "Auto scroll"
+        driveButton.bezelStyle = .rounded
+        driveButton.refusesFirstResponder = true
+        driveButton.target = self
+        driveButton.action = #selector(driveTapped)
+
+        let buttons = NSStackView(views: [driveButton, NSView(), cancel, done])
         buttons.orientation = .horizontal
         buttons.spacing = 8
 
@@ -124,4 +154,5 @@ final class ScrollCaptureHUD {
 
     @objc private func doneTapped() { onDone?() }
     @objc private func cancelTapped() { onCancel?() }
+    @objc private func driveTapped() { onToggleDrive?() }
 }

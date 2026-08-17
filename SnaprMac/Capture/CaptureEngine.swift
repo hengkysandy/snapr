@@ -143,15 +143,25 @@ final class CaptureEngine {
     }
 
     private func grabScreen(_ screen: NSScreen, showsCursor: Bool) async throws -> CGImage {
-        let displays = try await shareableDisplays()
-        guard let display = Self.match(screen, in: displays) ?? displays.first else {
+        // ONE enumeration, used for both the display and our own windows.
+        // Fetching it twice doubled the slowest part of a capture, and this
+        // runs eight times a second during a scrolling capture.
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.excludingDesktopWindows(
+                false, onScreenWindowsOnly: true)
+        } catch {
+            throw Self.classify(error)
+        }
+        guard let display = Self.match(screen, in: content.displays) ?? content.displays.first else {
             throw CaptureError.noDisplay
         }
         let scale = Int(screen.backingScaleFactor.rounded())
         let cfg = Self.configuration(pixelWidth: display.width * scale,
                                      pixelHeight: display.height * scale,
                                      showsCursor: showsCursor)
-        let filter = SCContentFilter(display: display, excludingWindows: [])
+        let filter = SCContentFilter(display: display,
+                                     excludingWindows: Self.ownWindows(in: content))
 
         let image: CGImage
         do {
@@ -280,6 +290,22 @@ final class CaptureEngine {
         } catch {
             throw Self.classify(error)
         }
+    }
+
+    /// Snapr's own windows, so a capture never contains Snapr.
+    ///
+    /// MEASURED on a real scrolling capture: the panel that reports the height
+    /// sits over the screen for the whole run, so it landed in every frame and
+    /// was stitched into the result again and again. The finished image of a
+    /// web page had "0 px", "1273 px captured" and "1507 px captured" stamped
+    /// down the middle of it.
+    ///
+    /// Excluding the whole application rather than one panel, because the same
+    /// would happen to any window this app puts on screen during a capture, and
+    /// a capture of Snapr is never what anyone wants.
+    nonisolated static func ownWindows(in content: SCShareableContent) -> [SCWindow] {
+        let mine = ProcessInfo.processInfo.processIdentifier
+        return content.windows.filter { $0.owningApplication?.processID == mine }
     }
 
     private func shareableDisplays() async throws -> [SCDisplay] {

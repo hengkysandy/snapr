@@ -15,15 +15,21 @@ Requires macOS 15 or later. Apple Silicon and Intel.
 area. The selection runs over a frozen still of the screen, so nothing moves
 under you while you aim.
 
-**Capture a long page** with `⌃⇧5`. Draw a region, then scroll that window
-yourself while a small panel counts the height. Press `⌃⇧5` again, or click
-Done, and the frames are joined into one tall image. Sticky headers and footers
-are detected and appear once rather than being stamped through the middle.
+**Capture a long page** with `⌃⇧5`. Draw a region, then either let Snapr scroll
+for you or scroll the window yourself while a small panel counts the height.
+Press `⌃⇧5` again, or click Done, and the frames are joined into one tall image.
+Sticky headers and footers are detected and appear once rather than being
+stamped through the middle. Snapr's own panel never appears in the result.
 
-*You* scroll, not the app, and that is on purpose: making the app scroll for you
-would require the Accessibility permission, which Snapr does not want. If you
-scroll faster than it can follow it skips a frame and says so, rather than
-guessing and quietly dropping a paragraph.
+**Auto scroll is optional and needs one permission.** macOS only lets an app
+scroll another window if it is trusted for Accessibility, so the button on the
+panel asks for it the first time you press it. Granted, Snapr scrolls the page
+for you and stops on its own at the bottom. Not granted, you scroll and
+everything else works exactly the same. This is the only feature in Snapr that
+wants Accessibility, and it only ever sends scroll events with it.
+
+If you scroll faster than it can follow it skips a frame and says so, rather
+than guessing and quietly dropping a paragraph.
 
 **While selecting**
 
@@ -130,9 +136,14 @@ macOS will not let any app read the screen without it. Snapr asks on first
 capture and opens the right settings pane. **Quit and reopen Snapr after
 granting it**, because macOS only re-reads the permission at launch.
 
-Snapr does **not** need Accessibility. Its global shortcuts use Carbon hotkeys,
-which need no such grant. If anything asks you for Accessibility on Snapr's
-behalf, something is wrong.
+Snapr does **not** need Accessibility to capture, annotate, search, or use its
+global shortcuts. Those use Carbon hotkeys, which need no such grant.
+
+There is exactly **one** optional exception: letting Snapr scroll the page for
+you during a scrolling capture. macOS only delivers synthetic scroll events from
+a trusted process, so that button asks. Say no and scroll yourself, and nothing
+else changes. Nothing in Snapr reads other applications or watches what you
+type, with or without the grant.
 
 ## Default shortcuts
 
