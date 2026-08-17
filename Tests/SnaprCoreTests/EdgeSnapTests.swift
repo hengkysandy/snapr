@@ -133,6 +133,58 @@ struct EdgeSnapTests {
         #expect(!EdgeSnap.snap(in: buffer, at: PixelPoint(x: -5, y: -5)).accepted)
     }
 
+    /// The regression test for the bug that made edge snap useless on real
+    /// windows, kept in the synthetic form so it runs in microseconds.
+    ///
+    /// MEASURED on real captures of Snapr's own windows: the flood fill found a
+    /// **394x322** rectangle for a control that is about **395x330**, which is
+    /// correct to within a few pixels, and the acceptance test then refused it
+    /// with a reported side support of **0.02**.
+    ///
+    /// Two causes, both reproduced below. `snap` grows the flood bounds by one
+    /// pixel before returning, so a two-touching-pixel test straddles a boundary
+    /// that has already moved. And real macOS controls are rounded and
+    /// anti-aliased, so the change in brightness is spread over two or three
+    /// pixels instead of landing in a single step.
+    ///
+    /// Before the fix this test failed and `flatScreenIsRejected` passed. Both
+    /// have to hold at once, which is the whole difficulty: the acceptance test
+    /// must refuse empty desktop and accept a soft-edged control.
+    @Test("a control with a SOFT anti-aliased edge is accepted, not thrown away")
+    func softEdgedControlIsAccepted() {
+        var s = SyntheticScreen(width: 600, height: 400, background: desktop)
+        s.fill(PixelRect.xywh(80, 60, 440, 280), windowFill)
+
+        // A control with a three-pixel gradient at its edge instead of a hard
+        // border, which is what a real rounded, anti-aliased control looks like
+        // to a pixel reader.
+        let target = PixelRect.xywh(200, 150, 120, 40)
+        // Steps of THREE, deliberately below the threshold of 4. A steeper ramp
+        // does not reproduce the bug: the first attempt used steps of 10, the
+        // old two-pixel test scored 1.00 on it, and the control correctly said
+        // the test was proving nothing. Real vibrancy moves a shade or two per
+        // pixel, which is exactly what slips under a single-step test.
+        for (i, shade) in [60, 63, 66].enumerated() {
+            s.fill(target.inset(by: i), SRGB(r: shade, g: shade, b: shade + 4))
+        }
+        s.fill(target.inset(by: 3), controlFill)
+
+        let result = EdgeSnap.snap(in: s.buffer, at: target.centre)
+        #expect(result.accepted,
+                "a soft-edged control was refused with reason: \(result.reason)")
+        #expect(result.rect.iou(target) > 0.8,
+                "IoU \(result.rect.iou(target)), got \(result.rect), wanted \(target)")
+
+        // The control. `band: 1` is the old two-touching-pixel behaviour. If it
+        // ALSO passes, this test proves nothing and the fix was not the fix.
+        let oldStyle = EdgeSnap.sideSupport(result.rect, in: s.buffer, band: 1)
+        let newStyle = EdgeSnap.sideSupport(result.rect, in: s.buffer)
+        #expect((oldStyle.min() ?? 0) < 0.30,
+                "the old two-pixel test would have ACCEPTED this, so the fix is untested")
+        #expect((newStyle.min() ?? 0) >= 0.30,
+                "the banded test should see the soft edge, got \(newStyle)")
+    }
+
     @Test("a one-pixel sliver is rejected as too small to be an element")
     func sliverRejected() {
         var s = SyntheticScreen(width: 600, height: 400, background: desktop)

@@ -260,6 +260,44 @@ result proves the approach is worth building at 0.2 ms with a working rejection
 path. It does not prove the accuracy number. **The snap is therefore always a
 suggestion the user can ignore, never an automatic selection.**
 
+### Measured on real windows after 0.1.0 shipped, and it is much worse
+
+Full detail in `probes/edges/REAL-RESULTS.md`. The caveat above was right and
+understated.
+
+| | synthetic fixture | real windows, before | real windows, after a fix |
+|---|---|---|---|
+| controls hit | **20/22 (91%)** | **1/18 (6%)** | **8/18 (44%)** |
+| false accepts | 0 | 0 | 0 |
+
+The collapse was not the technique. The flood fill was finding **correct**
+rectangles (394x322 for a control that is about 395x330) and the **acceptance
+test was discarding them**, for two reasons:
+
+1. `snap` grows the flood bounds by one pixel, and `sideSupport` then compared
+   two touching pixels across a boundary that had already moved.
+2. Real controls are rounded and anti-aliased, so the change in brightness is
+   spread over two or three pixels rather than landing in a single step.
+
+`sideSupport` now compares a three-pixel band inside the edge against a band
+outside it. Both rejection tests still pass, which is the hard part: the same
+test has to refuse empty desktop and accept a soft-edged control.
+
+**What still fails: small toolbar icon buttons.** The flood returns the icon
+(16x26) rather than the button (about 60x34), because `modalColour` samples a
+5-pixel radius and every one of those pixels is glyph.
+
+**Design consequence, and it changes the product claim.** Edge snap is a
+*useful assist*, not a headline feature. It must not be advertised as one, and
+the two techniques that would genuinely fix it are:
+
+- `SCShareableContent` window frames, which are **exact**, cost no extra
+  permission, and are already fetched by `listWindows()`. Snapping to a whole
+  window is the most common case. This is the next piece of work.
+- `AXUIElementCopyElementAtPosition`, which returns the true control frame
+  because the OS already knows it. It needs the Accessibility grant, which this
+  design deliberately avoids, so it is a trade for the owner to make.
+
 ---
 
 ## 6. Storage

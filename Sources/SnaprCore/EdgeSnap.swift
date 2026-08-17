@@ -148,25 +148,67 @@ public enum EdgeSnap {
         return (true, "ok", confidence)
     }
 
-    /// For each side, the fraction of its length that has a luma step across it.
-    static func sideSupport(_ rect: PixelRect, in buffer: PixelBuffer, threshold: Int = 4) -> [Double] {
+    /// For each side, the fraction of its length that has a real change in
+    /// brightness across it.
+    ///
+    /// This compares a BAND just inside the edge against a BAND just outside it,
+    /// rather than two touching pixels. Two reasons, both measured on real
+    /// captures of macOS windows rather than on the synthetic fixture:
+    ///
+    /// 1. **`snap` grows the flood bounds by one pixel** before returning, so a
+    ///    two-pixel test straddles a boundary that has already moved. On a real
+    ///    window this reported support of **0.02 for a rectangle that was
+    ///    correct to within one pixel** (a 394x322 result against a ~395x330
+    ///    control), and the acceptance test then threw the good answer away.
+    /// 2. **Real controls do not have hard edges.** They are rounded,
+    ///    anti-aliased and often semi-transparent over vibrancy, so the change is
+    ///    spread over two or three pixels instead of landing in one step. The
+    ///    synthetic fixture had hard one-pixel borders, which is exactly the
+    ///    case a two-pixel test handles and real UI never is.
+    ///
+    /// `band` is deliberately small. Widening it starts measuring the content
+    /// inside the element rather than its edge.
+    static func sideSupport(_ rect: PixelRect, in buffer: PixelBuffer,
+                            threshold: Int = 4, band: Int = 3) -> [Double] {
         func fraction(_ samples: Int, _ hits: Int) -> Double {
             samples <= 0 ? 0 : Double(hits) / Double(samples)
         }
+        /// Mean luma of `count` pixels walking from (x, y) in direction (dx, dy).
+        /// Returns nil when the walk leaves the image, so an edge at the border
+        /// contributes nothing rather than contributing a made-up number.
+        func meanLuma(x: Int, y: Int, dx: Int, dy: Int, count: Int) -> Double? {
+            var total = 0, n = 0
+            for i in 0..<count {
+                let px = x + dx * i, py = y + dy * i
+                guard buffer.contains(px, py) else { break }
+                total += buffer.lumaAt(x: px, y: py)
+                n += 1
+            }
+            return n == 0 ? nil : Double(total) / Double(n)
+        }
+        func differs(_ a: Double?, _ b: Double?) -> Bool {
+            guard let a, let b else { return false }
+            return abs(a - b) >= Double(threshold)
+        }
+
         var top = 0, bottom = 0, left = 0, right = 0
         var hSamples = 0, vSamples = 0
 
         for x in rect.x0..<rect.x1 {
             guard buffer.contains(x, rect.y0), buffer.contains(x, rect.y1 - 1) else { continue }
             hSamples += 1
-            if abs(buffer.lumaAt(x: x, y: rect.y0) - buffer.lumaAt(x: x, y: rect.y0 - 1)) >= threshold { top += 1 }
-            if abs(buffer.lumaAt(x: x, y: rect.y1 - 1) - buffer.lumaAt(x: x, y: rect.y1)) >= threshold { bottom += 1 }
+            if differs(meanLuma(x: x, y: rect.y0, dx: 0, dy: 1, count: band),
+                       meanLuma(x: x, y: rect.y0 - 1, dx: 0, dy: -1, count: band)) { top += 1 }
+            if differs(meanLuma(x: x, y: rect.y1 - 1, dx: 0, dy: -1, count: band),
+                       meanLuma(x: x, y: rect.y1, dx: 0, dy: 1, count: band)) { bottom += 1 }
         }
         for y in rect.y0..<rect.y1 {
             guard buffer.contains(rect.x0, y), buffer.contains(rect.x1 - 1, y) else { continue }
             vSamples += 1
-            if abs(buffer.lumaAt(x: rect.x0, y: y) - buffer.lumaAt(x: rect.x0 - 1, y: y)) >= threshold { left += 1 }
-            if abs(buffer.lumaAt(x: rect.x1 - 1, y: y) - buffer.lumaAt(x: rect.x1, y: y)) >= threshold { right += 1 }
+            if differs(meanLuma(x: rect.x0, y: y, dx: 1, dy: 0, count: band),
+                       meanLuma(x: rect.x0 - 1, y: y, dx: -1, dy: 0, count: band)) { left += 1 }
+            if differs(meanLuma(x: rect.x1 - 1, y: y, dx: -1, dy: 0, count: band),
+                       meanLuma(x: rect.x1, y: y, dx: 1, dy: 0, count: band)) { right += 1 }
         }
         return [fraction(hSamples, top), fraction(hSamples, bottom),
                 fraction(vSamples, left), fraction(vSamples, right)]

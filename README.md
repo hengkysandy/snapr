@@ -21,9 +21,16 @@ under you while you aim.
 |---|---|
 | Zoom loupe | A magnified pixel grid follows the cursor with the exact hex value |
 | Pixel measurement | Arrow keys nudge each edge by exactly one pixel. Shift moves by ten |
-| Edge snap | `A` snaps the selection to the element under the cursor. Press again to grow outward |
+| Edge snap | `A` suggests the element under the cursor. Press again to grow outward. See the note below |
 | Colour picker | Click to take the exact pixel. Hold Shift to take the darkest pixel nearby, because nobody can hit a one-pixel target |
 | Contrast | A live WCAG ratio and grade across the selection |
+
+**A straight note about edge snap.** Measured against real macOS windows, it
+finds the element under the cursor about **44%** of the time. It never suggests a
+wrong rectangle (it stays silent instead), so it costs nothing to try, but it is
+an assist rather than a feature to rely on. Small toolbar icon buttons are its
+worst case: it tends to find the icon rather than the button. `docs/design.md`
+section 5.4 has the numbers and the two ways it could be made exact.
 
 **Annotate** with arrows, boxes, text, numbered steps, pixelated blur and
 highlight. Undo and redo. Crop. Copy, save as PNG, or drag the image straight
