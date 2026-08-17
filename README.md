@@ -25,12 +25,15 @@ under you while you aim.
 | Colour picker | Click to take the exact pixel. Hold Shift to take the darkest pixel nearby, because nobody can hit a one-pixel target |
 | Contrast | A live WCAG ratio and grade across the selection |
 
-**A straight note about edge snap.** Measured against real macOS windows, it
-finds the element under the cursor about **44%** of the time. It never suggests a
-wrong rectangle (it stays silent instead), so it costs nothing to try, but it is
-an assist rather than a feature to rely on. Small toolbar icon buttons are its
-worst case: it tends to find the icon rather than the button. `docs/design.md`
-section 5.4 has the numbers and the two ways it could be made exact.
+**A straight note about edge snap.** `A` offers a ladder, smallest first: the
+element under the cursor, then the window under the cursor, then larger windows.
+
+The **window** rungs are exact, because macOS reports the real frames. The
+**element** rung is pixel-based and finds the control about **44%** of the time
+on real windows, measured rather than guessed. It never suggests a wrong
+rectangle, it stays silent instead, so when it misses you simply get the window.
+Small toolbar icon buttons are its worst case: it tends to find the icon rather
+than the button. `docs/design.md` sections 5.4 and 5.5 have the numbers.
 
 **Annotate** with arrows, boxes, text, numbered steps, pixelated blur and
 highlight. Undo and redo. Crop. Copy, save as PNG, or drag the image straight

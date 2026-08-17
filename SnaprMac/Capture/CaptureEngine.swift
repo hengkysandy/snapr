@@ -197,6 +197,36 @@ final class CaptureEngine {
         return infos
     }
 
+    /// Window frames for one screen, converted into that screen's IMAGE pixel
+    /// space, ready to hand to the selection overlay.
+    ///
+    /// `listWindows()` reports frames in GLOBAL backing pixels. The overlay
+    /// works in the captured image's own space, whose origin is the screen's
+    /// top-left corner, so the screen origin has to come off. On a single
+    /// display that offset is zero and the bug would be invisible, which is
+    /// exactly why the subtraction is written out here rather than skipped.
+    /// This is gap A7 in the design: unmeasured until there is a second display.
+    ///
+    /// Used for snapping. MEASURED (`probes/edges/REAL-RESULTS.md`): pixel
+    /// element snapping finds the control 8 times in 18 on real windows, so
+    /// more than half the time the snap key does nothing. These frames are
+    /// EXACT and cost no extra permission, so they give the key something
+    /// correct to do every time.
+    func windowFrames(on screen: NSScreen) async -> [PixelRect] {
+        guard let windows = try? await listWindows() else {
+            // A snap suggestion is a nicety. Failing to enumerate must never
+            // stop the user selecting a region by hand.
+            Log.capture.info("window frames unavailable, snapping falls back to pixels only")
+            return []
+        }
+        let scale = screen.backingScaleFactor
+        let originX = Int((screen.frame.minX * scale).rounded())
+        let originY = Int((screen.frame.minY * scale).rounded())
+        return windows
+            .filter { $0.isOnScreen }
+            .map { $0.frame.offsetBy(dx: -originX, dy: -originY) }
+    }
+
     func frontmostWindow() async throws -> WindowInfo? {
         guard let front = NSWorkspace.shared.frontmostApplication else { return nil }
         let pid = front.processIdentifier

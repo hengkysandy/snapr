@@ -43,7 +43,11 @@ final class OverlayController {
     ///   - buffer: the same image as RGBA8, built once by `ImageBridge`.
     ///   - screen: the screen the still came from. The panel covers it exactly,
     ///     which is what makes the point-to-pixel conversion a single flip.
-    func begin(frozen: CGImage, buffer: PixelBuffer, screen: NSScreen, settings: Settings) {
+    ///   - windows: exact window frames for this screen, in image pixels.
+    ///     Defaults to empty so the contract signature still compiles, and an
+    ///     empty list degrades snapping to pixels only rather than breaking it.
+    func begin(frozen: CGImage, buffer: PixelBuffer, screen: NSScreen,
+               settings: Settings, windows: [PixelRect] = []) {
         // A second `begin` while one is open would leak the first panel and
         // leave two overlays fighting for key. Cancel is the honest answer.
         if panel != nil { cancel() }
@@ -77,6 +81,7 @@ final class OverlayController {
         panel.setFrame(screen.frame, display: false)
 
         let view = OverlayView(frozen: frozen, buffer: buffer, geometry: geometry, settings: settings)
+        view.windowFrames = windows
         view.frame = CGRect(origin: .zero, size: screen.frame.size)
         view.autoresizingMask = [.width, .height]
         view.onOutcome = { [weak self] outcome in self?.complete(outcome) }

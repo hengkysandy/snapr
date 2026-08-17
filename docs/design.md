@@ -287,16 +287,52 @@ test has to refuse empty desktop and accept a soft-edged control.
 (16x26) rather than the button (about 60x34), because `modalColour` samples a
 5-pixel radius and every one of those pixels is glyph.
 
-**Design consequence, and it changes the product claim.** Edge snap is a
-*useful assist*, not a headline feature. It must not be advertised as one, and
-the two techniques that would genuinely fix it are:
+**Design consequence, and it changes the product claim.** Pixel-based element
+snap is a *useful assist*, not a headline feature. It must not be advertised as
+one on its own.
 
-- `SCShareableContent` window frames, which are **exact**, cost no extra
-  permission, and are already fetched by `listWindows()`. Snapping to a whole
-  window is the most common case. This is the next piece of work.
-- `AXUIElementCopyElementAtPosition`, which returns the true control frame
-  because the OS already knows it. It needs the Accessibility grant, which this
-  design deliberately avoids, so it is a trade for the owner to make.
+### 5.5 Window frames, which make the snap key worth pressing
+
+Pixel element snap alone finds the control 8 times in 18, and it stays silent
+the rest of the time. **A key that does nothing more than half the time is a key
+people stop pressing.**
+
+`SCShareableContent` reports window frames **exactly**, at no extra permission
+cost, and `listWindows()` already fetches them. So the snap key offers a ladder,
+smallest first, built by `SnapLadder` in the core:
+
+1. the element under the cursor, if the pixel snap accepted one
+2. its parents, from the same flood
+3. the window under the cursor, which is exact
+4. larger windows under the cursor, outermost last
+
+When the element snap misses, rung 1 is simply the window, so the key always
+does something correct.
+
+**Verified on the running app.** A single press at one point produced:
+
+```
+snap rungs=4 fromElement=true sizes=1946x154 -> 1446x1250 -> 2200x1236 -> 2940x1846
+```
+
+The last three are System Settings, Terminal and Chrome at exactly twice their
+point frames, so the point-to-pixel conversion is right. Three further points
+where the pixel snap failed (`fromElement=false`) still returned a rung each.
+Before this, all three would have beeped and done nothing.
+
+Two limitations, written down rather than discovered later:
+
+- **The ladder does not know z-order.** A point can sit inside the frame of a
+  window that is behind another one, and that rung will then select a rectangle
+  showing the front window's pixels. The rectangle is still a real window's
+  geometry, so the result is odd rather than wrong.
+- **The screen-origin subtraction in `windowFrames(on:)` is zero on a single
+  display**, so a mistake there would be invisible here. That is gap A7 again.
+
+The remaining technique that would make *element* snapping exact is
+`AXUIElementCopyElementAtPosition`, which returns the true control frame because
+the OS already knows it. It needs the Accessibility grant, which this design
+deliberately avoids, so it is a trade for the owner to make.
 
 ---
 

@@ -134,9 +134,16 @@ final class OverlayView: NSView {
     private var cursor = PixelPoint(x: 0, y: 0)
     private var trackingArea: NSTrackingArea?
 
-    /// The current edge-snap suggestion, or nil for "show nothing".
-    private var snap: EdgeSnap.Result?
-    private var snapLevel = 0
+    /// The current snap suggestions, smallest first, or empty for "show
+    /// nothing". Built by `SnapLadder` from the pixel snap plus the real window
+    /// frames, so pressing again grows outward through both.
+    private var snapLadder: [PixelRect] = []
+    private var snapRung = 0
+
+    /// Exact window frames for this screen, in image pixels. Empty when
+    /// enumeration failed, which degrades snapping to pixels only rather than
+    /// breaking the overlay.
+    var windowFrames: [PixelRect] = []
 
     /// What the last colour pick copied, so the user gets confirmation. The
     /// string is drawn on screen and NEVER logged: a picked colour is content
@@ -209,8 +216,8 @@ final class OverlayView: NSView {
         cursor = p
         // A new drag replaces any snap suggestion. The snap is a suggestion the
         // user can ignore, and starting a fresh drag is how they ignore it.
-        snap = nil
-        snapLevel = 0
+        snapLadder = []
+        snapRung = 0
         selection = Selection(from: p, to: p, bounds: buffer.bounds)
         needsDisplay = true
     }
@@ -290,7 +297,8 @@ final class OverlayView: NSView {
         }
         selection = s
         // A nudged selection is no longer the snapped one.
-        snap = nil
+        snapLadder = []
+        snapRung = 0
         needsDisplay = true
     }
 
@@ -305,37 +313,49 @@ final class OverlayView: NSView {
     /// So when `accepted` is false this shows NOTHING. No indicator, no
     /// "best guess", no selection change.
     private func pressSnap() {
-        if let existing = snap, existing.accepted {
-            // Press again to move out one level. Max 3, and no deeper.
-            // MEASURED: level-1 parents are often a large jump rather than the
-            // visually obvious container. For a title bar, level 1 was the
-            // whole desktop band at IoU 0.043, so a deep breadcrumb would be
-            // confidently useless.
-            let top = min(existing.levels.count, 3) - 1
-            guard top > snapLevel else { NSSound.beep(); return }
-            snapLevel += 1
-            selection = Selection(rect: existing.levels[snapLevel], bounds: buffer.bounds)
+        // Already showing a ladder: move out one rung.
+        if !snapLadder.isEmpty {
+            guard snapRung + 1 < snapLadder.count else { NSSound.beep(); return }
+            snapRung += 1
+            selection = Selection(rect: snapLadder[snapRung], bounds: buffer.bounds)
             needsDisplay = true
             return
         }
 
         let seed = selection.map { $0.rect.centre } ?? cursor
-        let result = EdgeSnap.snap(in: buffer, at: seed, maxLevels: 3)
-        guard result.accepted else {
-            snap = nil
-            snapLevel = 0
+        let element = EdgeSnap.snap(in: buffer, at: seed, maxLevels: 3)
+
+        // The window frames are the reason this key is worth pressing.
+        // MEASURED: the pixel snap alone finds the control 8 times in 18 on
+        // real windows, so on its own the key does nothing more than half the
+        // time. Window frames are exact and always available.
+        let ladder = SnapLadder.build(at: seed, element: element,
+                                      windows: windowFrames, bounds: buffer.bounds)
+        guard !ladder.isEmpty else {
+            snapLadder = []
+            snapRung = 0
             NSSound.beep()
-            // The reason is a fixed string from the core, not user content.
-            Log.overlay.info("snap rejected reason=\(result.reason, privacy: .public)")
+            // The reason is a fixed string from the core, never user content.
+            Log.overlay.info("""
+                snap found nothing, element reason=\(element.reason, privacy: .public) \
+                windows=\(self.windowFrames.count, privacy: .public)
+                """)
             needsDisplay = true
             return
         }
-        snap = result
-        snapLevel = 0
-        selection = Selection(rect: result.rect, bounds: buffer.bounds)
+
+        snapLadder = ladder
+        snapRung = 0
+        selection = Selection(rect: ladder[0], bounds: buffer.bounds)
+        // The rung sizes, not just the count. A ladder that says "4" while
+        // every rung is the same size is indistinguishable from a working one,
+        // and sizes are our own geometry, never user content.
+        let sizes = ladder.map { "\($0.width)x\($0.height)" }.joined(separator: " -> ")
         Log.overlay.info("""
-            snap accepted levels=\(result.levels.count, privacy: .public) \
-            confidence=\(String(format: "%.2f", result.confidence), privacy: .public)
+            snap rungs=\(ladder.count, privacy: .public) \
+            fromElement=\(element.accepted, privacy: .public) \
+            windows=\(self.windowFrames.count, privacy: .public) \
+            sizes=\(sizes, privacy: .public)
             """)
         needsDisplay = true
     }
@@ -410,15 +430,14 @@ final class OverlayView: NSView {
         }
 
         // 4. The snap suggestion, only ever when it was accepted.
-        if let snap, snap.accepted, snapLevel < snap.levels.count {
-            let viewRect = geometry.viewRect(fromPixelRect: snap.levels[snapLevel])
+        if snapRung < snapLadder.count {
+            let viewRect = geometry.viewRect(fromPixelRect: snapLadder[snapRung])
             ctx.setStrokeColor(NSColor.systemYellow.cgColor)
             ctx.setLineWidth(1)
             ctx.setLineDash(phase: 0, lengths: [4, 3])
             ctx.stroke(viewRect.insetBy(dx: 0.5, dy: 0.5))
             ctx.setLineDash(phase: 0, lengths: [])
-            let levels = min(snap.levels.count, 3)
-            draw(text: "snap \(snapLevel + 1)/\(levels)",
+            draw(text: "snap \(snapRung + 1)/\(snapLadder.count)",
                  at: CGPoint(x: viewRect.minX, y: viewRect.maxY + 4),
                  background: NSColor.systemYellow.withAlphaComponent(0.9),
                  foreground: .black)

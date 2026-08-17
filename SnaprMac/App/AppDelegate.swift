@@ -251,8 +251,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Log.capture.info("frozen frame \(frozen.width)x\(frozen.height) in \(Redact.ms(CFAbsoluteTimeGetCurrent() - start), privacy: .public)")
                 pendingKind = kind
                 pendingFrozen = frozen
+                // Fetched AFTER the capture, so enumeration never delays the
+                // freeze. The frame is already still by this point, so the
+                // window list cannot drift out of step with what is on screen.
+                let windows = await capture.windowFrames(on: screen)
                 overlay.begin(frozen: frozen, buffer: buffer, screen: screen,
-                              settings: SettingsStore.shared.settings)
+                              settings: SettingsStore.shared.settings,
+                              windows: windows)
             } catch {
                 report(captureError: error)
             }
