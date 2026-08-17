@@ -1,0 +1,12 @@
+.app-signing
+.env.local
+.build/
+.swiftpm/
+*.xcodeproj
+SnaprMac/Info.plist
+dist/
+art/AppIcon.icns
+art/AppIcon.iconset/
+DerivedData/
+.DS_Store
+NOTES.md

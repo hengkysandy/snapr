@@ -1,0 +1,96 @@
+name: SnaprMac
+options:
+  deploymentTarget: { macOS: "15.0" }
+  createIntermediateGroups: true
+
+packages:
+  SnaprCore:
+    path: .                       # the SwiftPM package in this same folder
+  # Used directly with the SQLite C API. Not GRDB: its SQLCipher support is not
+  # a selectable product, and a consumer cannot edit a dependency's manifest, so
+  # using it would mean forking and maintaining GRDB.
+  SQLCipher:
+    url: https://github.com/sqlcipher/SQLCipher.swift.git
+    from: 4.17.0
+
+targets:
+  SnaprMac:
+    type: application
+    platform: macOS
+    sources:
+      - SnaprMac
+      # Built by ./app icons with iconutil, not by an asset catalog. Measured
+      # on the previous app: Xcode 26 silently dropped the 256, 512 and 1024
+      # entries from a scale-based AppIcon set, leaving the Dock and Get Info
+      # with no large artwork.
+      - path: art/AppIcon.icns
+        buildPhase: resources
+        optional: true
+    dependencies:
+      - package: SnaprCore
+        product: SnaprCore
+      - package: SQLCipher
+        product: SQLCipher
+    info:
+      path: SnaprMac/Info.plist
+      properties:
+        CFBundleName: Snapr
+        CFBundleDisplayName: Snapr
+        CFBundleIconFile: AppIcon
+        # Set explicitly. Without it XcodeGen's generated plist defaults to 1.0,
+        # so the DMG filename disagrees with the version the app reports.
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        # Menu bar only. No Dock icon, no main window on launch.
+        LSUIElement: true
+        # Shown in the Screen Recording prompt. The user reads this sentence
+        # while deciding, so it says what Snapr does with the pixels.
+        NSCameraUsageDescription: Snapr does not use the camera.
+        NSAppleEventsUsageDescription: Snapr does not send Apple Events.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hengkysandy.snapr.mac
+        SWIFT_VERSION: "6.0"
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        ENABLE_HARDENED_RUNTIME: "NO"
+        # NOT sandboxed. A free Apple account cannot ship to the Mac App Store,
+        # so the sandbox buys nothing and costs a security-scoped bookmark on
+        # every folder the user picks.
+        ENABLE_APP_SANDBOX: "NO"
+        # Ad-hoc is NOT the default here, unlike the usual advice. Measured on
+        # the capture probe: under ad-hoc the designated requirement is
+        # `cdhash H"..."`, which changes on every build, so macOS drops the
+        # Screen Recording grant and the app then looks perfectly healthy while
+        # capturing nothing. A real certificate gives identifier plus
+        # certificate with no cdhash, which survives rebuilds.
+        # ./app injects the identity; these are only fallbacks.
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        DEVELOPMENT_TEAM: ""
+        SWIFT_STRICT_CONCURRENCY: complete
+
+  SnaprMacTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources: [SnaprMacTests]
+    dependencies:
+      - target: SnaprMac
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        # No `info:` block above, so XcodeGen has no plist path to generate.
+        # Without this, code signing the test bundle fails.
+        GENERATE_INFOPLIST_FILE: "YES"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+
+schemes:
+  SnaprMac:
+    build:
+      targets:
+        SnaprMac: all
+    test:
+      targets: [SnaprMacTests]
+    run:
+      config: Debug
