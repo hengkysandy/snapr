@@ -31,8 +31,11 @@ wants Accessibility, and it only ever sends scroll events with it.
 If you scroll faster than it can follow it skips a frame and says so, rather
 than guessing and quietly dropping a paragraph.
 
-MEASURED on a 1200 line document: 110 frames, none refused, 30,000 pixels of
-page in under seven seconds, with every line read back in order.
+Pages with a bar pinned to the top or the bottom work: the bar is detected and
+appears once, at the end it belongs to, rather than being stamped through the
+middle. MEASURED on the same page in both browser engines, with the region drawn
+around both bars: Safari 105 frames and Chrome 104 frames, none refused in
+either, and exactly two bars in a 30,000 pixel image.
 
 **While selecting**
 

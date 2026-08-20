@@ -756,6 +756,71 @@ two thirds of the frame stalls partway through, because at that step the overlap
 is down to the ten lines the stitcher insists on, one frame is refused, and from
 then on every frame is two steps away and permanently out of range.
 
+### Sticky bands are measured before the first match, not after it
+
+MEASURED in Safari, on a local page with a `position: fixed` header and a
+`position: fixed` footer, with the capture region drawn around both:
+
+```
+266 frames captured, 0 refused, 223 restarted, 42 unchanged   -> nothing
+```
+
+The identical region drawn INSIDE the two bars:
+
+```
+128 frames, 0 refused, 0 rebased                              -> stitched
+```
+
+So it is the bars, not the browser.
+
+It is a deadlock. A band that stays put while the rest of the page moves
+disagrees with the content at every candidate offset, the true one included, so
+the winner no longer scores near zero. Worse, the bands are pixel-identical at
+an offset of ZERO while the content is not, so dy=0 scores best and the frame is
+reported as "nothing moved" rather than as refused. From the test fixture, a 106
+row header and an 83 row footer on a 780 row frame:
+
+```
+plain    still         best=325 bestDY=0   second=2973  median=31249
+banded   scrolled(260) best=0   bestDY=260 second=229   median=26779
+```
+
+Nothing is accepted, so the bands are never measured, so nothing is ever
+accepted.
+
+They are now measured on any frame that fails to match, before the first match.
+It is SELF-VALIDATING: the bands are only adopted when re-running the search
+with them turns the failure into a real match. A wrong guess changes nothing,
+and two genuinely identical frames report the whole frame as sticky, still find
+nothing moved, and are not adopted.
+
+Afterwards, both engines, region around both bars:
+
+| | frames | refused | rebased | result |
+|---|---|---|---|---|
+| Safari | 105 | 0 | 0 | 2901x30149, exactly two bars, one at each end |
+| Chrome | 104 | 0 | 0 | 2881x30141, exactly two bars, one at each end |
+
+### A Snapr window can block Snapr's own scroll
+
+Our own windows are cut out of the picture. They cannot be cut out of receiving
+a scroll, because a scroll goes to whatever window is physically under the
+pointer. So the frames show the page behind our window while the scroll lands on
+our window.
+
+MEASURED: after one scrolling capture the result opens in the editor, and a
+second capture started without closing it produced 41 frames, 40 of them
+unchanged, and told the user that nothing under their region scrolled. The
+region was fine. The advice sent them the wrong way.
+
+Checked by Z-ORDER, not by frames. Testing frames alone raised the warning on a
+run that then completed with 239 frames and nothing refused, because one of our
+windows merely overlapped the point from behind.
+
+Checked when the run GIVES UP, not when it starts. The selection overlay is one
+of our own windows too and is still fading when the first frame is taken, so
+checking at the start reported every single run as obstructed.
+
 ### Sticky bands
 
 A sticky header is harmless, because it is only ever taken from the first frame.
@@ -919,6 +984,31 @@ Anyone can read it. **That is the repository owner's decision to make before the
 first public release, not after.**
 
 ---
+
+## 10.1 A note on measuring this app, learned the hard way
+
+Half the time spent on the scrolling-capture work went on measurements that were
+wrong, and every one was wrong the same way: the harness, not the app.
+
+- A run reported 41 frames of a page that never moved. The page had never moved,
+  because the app being scrolled was **completely buried** behind other windows,
+  and the synthetic scroll went to whatever was on top. `SCShareableContent`
+  will happily list a window that has no visible pixels at all.
+- Screenshots taken "during" a run caught the **selection overlay**, which is a
+  dimmed still of the screen, and reported movement that was not there.
+- An OCR check of a finished capture reported 53 missing lines. Vision returns
+  observations in **no guaranteed vertical order**, so the sequence check was
+  meaningless. Looking at the pixels showed the lines were all present. Check
+  the SET, not the sequence.
+- A scroll probe reported that Safari moved and Chrome did not, twice, in both
+  directions, on different runs. Both were about which window happened to be in
+  front at the time.
+
+The habit that works: before measuring anything, find a point where the target
+app really is the frontmost window, by walking `SCShareableContent.windows` in
+order rather than by clicking somewhere and hoping. `tools/findspot.swift` does
+exactly that, and it turned an unexplained "Chrome does not work" into a clean
+104 frames with nothing refused.
 
 ## 11. Still unproven, written down rather than hoped over
 
