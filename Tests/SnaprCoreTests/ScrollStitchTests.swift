@@ -565,3 +565,69 @@ struct ScrollStitchNarrowMarginTests {
         #expect(wrong == 0, "\(wrong) of \(out.height) rows came from the wrong place")
     }
 }
+
+/// A page with a bar bolted to the top and another bolted to the bottom.
+///
+/// MEASURED in Safari, on a local page with a `position: fixed` header and a
+/// `position: fixed` footer, captured with a region that included both:
+///
+///     266 frames captured, 0 refused, 223 restarted, 42 unchanged  -> nothing
+///
+/// The identical region with the two bars left outside it:
+///
+///     128 frames, 0 refused, 0 rebased                             -> stitched
+///
+/// So it is the bars, not Safari's momentum scrolling. A band that stays put
+/// while the rest of the page moves disagrees with the content at EVERY
+/// candidate offset, the true one included, so the winner no longer scores near
+/// zero and the ratio test refuses the frame. Nothing is accepted, so the bands
+/// are never measured, so nothing is ever accepted.
+@Suite("Scroll stitch, sticky bars")
+struct ScrollStitchStickyDeadlockTests {
+
+    static func framed(_ page: PixelBuffer, at y: Int, height: Int,
+                       top: Int, bottom: Int) -> PixelBuffer {
+        ScrollStitchTests.withSticky(
+            ScrollStitchTests.viewport(page, at: y, height: height),
+            top: top, bottom: bottom)
+    }
+
+    @Test("a page with a fixed header and footer still stitches")
+    func stickyBarsDoNotDeadlock() {
+        let page = ScrollStitchNarrowMarginTests.editorPage(width: 720, height: 4000)
+        let h = 780, step = 260
+        // Proportions taken from the Safari fixture: a 56 point header and a
+        // 44 point footer on a 826 point region, doubled for a Retina display.
+        let top = 106, bottom = 83
+
+        var stitcher = ScrollStitcher(first: Self.framed(page, at: 0, height: h,
+                                                         top: top, bottom: bottom))
+        var y = 0
+        var accepted = 0
+        while y + step + h <= page.height {
+            y += step
+            if case .scrolled = stitcher.add(Self.framed(page, at: y, height: h,
+                                                         top: top, bottom: bottom)) {
+                accepted += 1
+            }
+        }
+        #expect(accepted >= 10, "only \(accepted) frames were accepted")
+
+        let out = stitcher.finish()
+        #expect(out.height > h * 3, "result is only \(out.height) rows tall")
+
+        // The bars must appear once each, not once per frame. The header is the
+        // dark blue band and the footer the orange one, both written by
+        // `withSticky`, and both are unmistakable in the red channel.
+        func rowIsHeader(_ row: Int) -> Bool {
+            out.rgba[(row * out.width + 40) * 4] == 10
+        }
+        func rowIsFooter(_ row: Int) -> Bool {
+            out.rgba[(row * out.width + 40) * 4] == 200
+        }
+        let headerRows = (0..<out.height).filter(rowIsHeader).count
+        let footerRows = (0..<out.height).filter(rowIsFooter).count
+        #expect(headerRows == top, "header appears on \(headerRows) rows, expected \(top)")
+        #expect(footerRows == bottom, "footer appears on \(footerRows) rows, expected \(bottom)")
+    }
+}

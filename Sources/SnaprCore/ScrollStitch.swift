@@ -356,8 +356,47 @@ public struct ScrollStitcher: Sendable {
     public mutating func add(_ frame: PixelBuffer) -> ScrollStitch.Step {
         guard frame.width == width, frame.height == frameHeight else { return .lost }
 
-        let step = ScrollStitch.offset(from: previous, to: frame,
+        var step = ScrollStitch.offset(from: previous, to: frame,
                                        stickyTop: stickyTop, stickyBottom: stickyBottom)
+
+        // Sticky bands have to be known BEFORE the first match, not after it,
+        // or a page with a fixed bar can never start.
+        //
+        // MEASURED in Safari on a page with a `position: fixed` header and
+        // footer, with the region drawn around both: 266 frames captured, 223
+        // restarted, nothing stitched. The identical region drawn inside the
+        // two bars: 128 frames, none refused, none restarted. So it is the
+        // bars, not the browser.
+        //
+        // The mechanism is a deadlock. A band that stays put while the rest of
+        // the page moves disagrees with the content at EVERY candidate offset,
+        // the true one included, so the winner no longer scores near zero and
+        // the ratio test refuses the frame. Nothing is accepted, so the bands
+        // are never measured, so nothing is ever accepted.
+        //
+        // It fires on `.still` as well as on `.lost`, and that is not an
+        // afterthought. MEASURED on the test fixture: with a 106 row header and
+        // an 83 row footer on a 780 row frame, the bands are pixel-identical at
+        // an offset of ZERO and the content is not, so dy=0 scores best and the
+        // frame is reported as "nothing moved" rather than as refused. The live
+        // Safari run showed both, 42 unchanged and 223 restarted.
+        //
+        // Measuring them here is safe because it is SELF-VALIDATING: the bands
+        // are only adopted when re-running the search with them turns a refusal
+        // or a false "still" into a real match. A wrong guess changes nothing.
+        // Two genuinely identical frames report the whole frame as sticky, the
+        // retry still finds nothing moved, and nothing is adopted.
+        var matched = false
+        if case .scrolled = step { matched = true }
+        if !matched, !stickyKnown {
+            let bands = ScrollStitch.stickyBands(previous, frame)
+            if bands.top > 0 || bands.bottom > 0 {
+                let retry = ScrollStitch.offset(from: previous, to: frame,
+                                                stickyTop: bands.top,
+                                                stickyBottom: bands.bottom)
+                if case .scrolled = retry { step = retry }
+            }
+        }
 
         guard case .scrolled(let dy) = step else {
             if step == .still || step == .rewound { dropped += 1 }

@@ -137,8 +137,33 @@ final class Toast {
 
     // MARK: - Building
 
+    /// Wide enough for the sentence, capped so a long path cannot span the
+    /// screen.
+    ///
+    /// MEASURED: at a fixed 340 points, "A Snapr window is covering that area.
+    /// Close it and try again" came out as "A Snapr window is coveri...rea.
+    /// Close it and try again". Middle truncation is right for a file path,
+    /// where the two ends carry the meaning, and it is the worst possible
+    /// choice for a sentence, where the middle does.
+    private static func width(for content: Content) -> CGFloat {
+        // The real labels, not an attributed-string estimate. MEASURED: the
+        // estimate came out about 20 points short, because an `NSTextField`
+        // carries padding of its own, and the toast still truncated.
+        let detail = NSTextField(labelWithString: content.detail)
+        detail.font = .systemFont(ofSize: 11)
+        let title = NSTextField(labelWithString: content.title)
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+
+        // The icon, the two 14 point insets, the 10 point gaps, and room for
+        // the chevron when the receipt is clickable. Symbols are not square, so
+        // the icon is allowed 30 rather than its 22 point size.
+        let furniture: CGFloat = 14 + 30 + 10 + 14 + (content.onClick != nil ? 10 + 30 : 0)
+        let text = max(detail.intrinsicContentSize.width, title.intrinsicContentSize.width)
+        return min(max(340, ceil(text) + furniture), 560)
+    }
+
     private func makePanel(for content: Content) -> NSPanel {
-        let size = NSSize(width: 340, height: 60)
+        let size = NSSize(width: Self.width(for: content), height: 60)
         let panel = NSPanel(contentRect: NSRect(origin: .zero, size: size),
                             // Non-activating, so the receipt never pulls focus
                             // away from whatever the user went back to.

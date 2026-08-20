@@ -79,8 +79,16 @@ final class ScrollCaptureSession {
     private var skippedBusy = 0
     /// Milliseconds per frame, so "it dropped frames" comes with a number.
     private var frameMillis: [Double] = []
-    /// Set when the run already knows why it produced nothing.
-    private var nothingHint: String?
+    private var ownWindowInTheWay = false
+    private var stillLogged = 0
+
+    private func logDiagnosis(_ label: String, _ d: ScrollStitch.Diagnosis) {
+        Log.capture.info("""
+            \(label, privacy: .public) frame, bestDY=\(d.bestDY, privacy: .public) \
+            best=\(d.best, privacy: .public) second=\(d.second, privacy: .public) \
+            median=\(d.median, privacy: .public) verified=\(d.verified, privacy: .public)
+            """)
+    }
 
     private(set) var drive: Drive = .manual
     /// When the page was last seen to move. An automatic run watches this to
@@ -130,6 +138,27 @@ final class ScrollCaptureSession {
     }
 
     var isRunning: Bool { timer != nil }
+
+    /// Snapr's own windows are cut out of the picture but they cannot be cut
+    /// out of receiving a scroll, because a scroll goes to whatever window is
+    /// physically under the pointer. So the frames show the page behind our
+    /// window while the scroll lands on our window, and the run records a page
+    /// that never moves.
+    ///
+    /// MEASURED: after one scrolling capture the result opens in the editor,
+    /// and a second capture started without closing it produced 41 frames, 40
+    /// of them unchanged, and told the user that nothing under their region
+    /// scrolled. The region was fine. The advice sent them the wrong way.
+    ///
+    /// This is checked when the run gives up rather than when it starts,
+    /// because the SELECTION OVERLAY is one of our own windows too and it is
+    /// still fading when the first frame is taken. MEASURED: checking at the
+    /// start reported every single run as obstructed, including one that went
+    /// on to capture 239 frames with nothing refused.
+    private var obstructionHint: String? {
+        ownWindowInTheWay ? "A Snapr window was covering it. Close it and try again" : nil
+    }
+
     var stitchedHeight: Int { stitcher?.height ?? 0 }
 
     /// Switch between scrolling by hand and letting the app do it.
@@ -174,16 +203,20 @@ final class ScrollCaptureSession {
         return max(40, Int(points / 6))
     }
 
-    private func postScroll() {
-        // The middle of the region, because a scroll goes to whatever is under
-        // the pointer rather than to whatever has focus. That is also what lets
-        // this work while Snapr stays in the background.
+    /// The point every scroll is aimed at.
+    private var scrollPoint: CGPoint {
         let scale = screen.backingScaleFactor
         let midX = (Double(region.x0) + Double(region.width) / 2) / scale
         let midY = (Double(region.y0) + Double(region.height) / 2) / scale
-        AutoScroller.scrollDown(points: scrollStep,
-                                at: CGPoint(x: screen.frame.minX + midX,
-                                            y: screen.frame.minY + midY))
+        return CGPoint(x: screen.frame.minX + midX, y: screen.frame.minY + midY)
+    }
+
+    private func postScroll() {
+        // The middle of the region, because a scroll goes to whatever is under
+        // the pointer rather than to whatever has focus. That is also what lets
+        // this work while Snapr stays in the background, and it is exactly why
+        // one of our OWN windows sitting there breaks the run.
+        AutoScroller.scrollDown(points: scrollStep, at: scrollPoint)
     }
 
     // MARK: - Running
@@ -208,10 +241,35 @@ final class ScrollCaptureSession {
 
     func stop() {
         guard !stopped else { return }
+        halt()
+        deliverEnding()
+    }
+
+    private func halt() {
         stopped = true
         timer?.invalidate()
         timer = nil
+    }
 
+    /// Stop, but find out WHY there is nothing before saying so.
+    ///
+    /// The reason needs a fresh look at the screen, and a fresh look is async,
+    /// so it cannot happen inside `accept`. It costs one window enumeration at
+    /// the end of a run that already failed.
+    private func giveUp() {
+        guard !stopped else { return }
+        halt()
+        Task { @MainActor in
+            if let source = try? await self.capture.frameSource(for: self.screen),
+               source.ownWindowCovers(self.scrollPoint) {
+                self.ownWindowInTheWay = true
+                Log.capture.info("scroll capture: one of Snapr's own windows covers the scroll point")
+            }
+            self.deliverEnding()
+        }
+    }
+
+    private func deliverEnding() {
         guard var stitcher, stitcher.accepted > 1 else {
             Log.capture.info("""
                 scroll capture ended with nothing, \(self.captured, privacy: .public) frames captured, \
@@ -219,7 +277,7 @@ final class ScrollCaptureSession {
                 \(self.stitcher?.dropped ?? 0, privacy: .public) unchanged, \
                 \(self.frameCostSummary, privacy: .public)
                 """)
-            onEnded?(.nothing(hint: nothingHint
+            onEnded?(.nothing(hint: obstructionHint
                 ?? (drive == .automatic
                     ? "Nothing under the middle of that region scrolled"
                     : "Scroll the window while the capture is running")))
@@ -339,13 +397,19 @@ final class ScrollCaptureSession {
             // The first few only. A run that refuses everything says so in five
             // lines just as well as in three hundred.
             if lost <= 5, let d = ScrollStitch.lastDiagnosis {
-                Log.capture.info("""
-                    refused frame, bestDY=\(d.bestDY, privacy: .public) \
-                    best=\(d.best, privacy: .public) second=\(d.second, privacy: .public) \
-                    median=\(d.median, privacy: .public) verified=\(d.verified, privacy: .public)
-                    """)
+                logDiagnosis("refused", d)
             }
         }
+        // A run that never gets going reports every frame as unchanged, and
+        // "unchanged" has two very different causes: the page really did not
+        // move, or something in the frame is anchored and makes an offset of
+        // zero score best. Only the numbers tell those apart, so the first few
+        // are logged while nothing has been accepted yet.
+        if step == .still, !everMoved, stillLogged < 5, let d = ScrollStitch.lastDiagnosis {
+            stillLogged += 1
+            logDiagnosis("unchanged", d)
+        }
+
         onProgress?(current.height, lost)
 
         // A refused frame counts as movement, because that is exactly what it
@@ -378,8 +442,7 @@ final class ScrollCaptureSession {
                 // page never moved" and "the page ran out" look identical in a
                 // frame count and have completely different fixes.
                 Log.capture.info("scroll capture gave up, the page never moved")
-                nothingHint = "Nothing under the middle of that region scrolled"
-                stop()
+                giveUp()
                 return
             }
         }

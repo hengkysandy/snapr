@@ -162,6 +162,28 @@ final class CaptureEngine {
     struct FrameSource {
         let filter: SCContentFilter
         let config: SCStreamConfiguration
+        /// Every on-screen window, FRONT TO BACK, with its global frame in
+        /// points and whether it is one of ours.
+        ///
+        /// Our own windows are excluded from the picture but they cannot be
+        /// excluded from receiving a scroll, because a scroll goes to whatever
+        /// window is physically under the pointer. That one-sidedness is
+        /// invisible and it is why the caller needs this. MEASURED: a scrolling
+        /// capture started with Snapr's own editor window left open over the
+        /// target produced 41 frames of a page that never moved, and blamed the
+        /// user's region.
+        let windowsFrontToBack: [(frame: CGRect, isOurs: Bool)]
+
+        /// Whether the window that would RECEIVE a scroll at this point is one
+        /// of ours.
+        ///
+        /// Z-order, not frames. MEASURED: testing frames alone raised the
+        /// warning on a run that then completed with 239 frames and nothing
+        /// refused, because one of our windows merely overlapped the point from
+        /// behind. A warning on a healthy run is worse than no warning at all.
+        func ownWindowCovers(_ point: CGPoint) -> Bool {
+            windowsFrontToBack.first { $0.frame.contains(point) }?.isOurs ?? false
+        }
     }
 
     func frameSource(for screen: NSScreen) async throws -> FrameSource {
@@ -176,12 +198,23 @@ final class CaptureEngine {
             throw CaptureError.noDisplay
         }
         let scale = Int(screen.backingScaleFactor.rounded())
+        let ours = Self.ownWindows(in: content)
+        let mine = ProcessInfo.processInfo.processIdentifier
         return FrameSource(
-            filter: SCContentFilter(display: display,
-                                    excludingWindows: Self.ownWindows(in: content)),
+            filter: SCContentFilter(display: display, excludingWindows: ours),
             config: Self.configuration(pixelWidth: display.width * scale,
                                        pixelHeight: display.height * scale,
-                                       showsCursor: false))
+                                       showsCursor: false),
+            // MEASURED: `SCShareableContent.windows` comes back front to back.
+            // Printed with the app names next to a screenshot to check that,
+            // rather than trusting it: index 0 was the frontmost window and the
+            // desktop and the Dock came last.
+            //
+            // `SCWindow.frame` is already global points, top-left origin, which
+            // is the space a `CGEvent` location uses.
+            windowsFrontToBack: content.windows.map {
+                ($0.frame, $0.owningApplication?.processID == mine)
+            })
     }
 
     func captureFrame(using source: FrameSource) async throws -> CGImage {
