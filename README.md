@@ -69,6 +69,16 @@ wrong colour is one click to fix rather than an undo and a redraw.
 Text goes back to idle when you finish a label, so typing one caption does not
 start the next one.
 
+**Zoom by pinching.** A trackpad pinch zooms the picture, and the part under
+your fingers stays under your fingers rather than sliding away. A two-finger
+double tap toggles between the whole image and its real pixels. The zoom buttons
+and `Cmd` with plus or minus work the same way, around the middle of what you
+are looking at.
+
+Above 100% the picture is drawn with no smoothing, so one image pixel stays a
+crisp square. That is the point of zooming into a screenshot, and it is why
+Snapr does its own zoom rather than letting the scroll view scale a blurred copy.
+
 Undo and redo, where a whole drag is one step. Crop. Copy, save, or drag the
 image straight into another app.
 
@@ -223,7 +233,7 @@ out rather than forgotten.
 
 ```
 Sources/SnaprCore/     every decision. No AppKit, no ScreenCaptureKit, no Vision
-Tests/SnaprCoreTests/  129 tests, no app and no permission needed
+Tests/SnaprCoreTests/  138 tests, no app and no permission needed
 SnaprMac/              the thin shell that touches macOS
 docs/design.md         the design, and the measurements that produced it
 CONTRACTS.md           the module boundaries

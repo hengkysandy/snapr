@@ -73,6 +73,99 @@ final class EditorTests: XCTestCase {
         return view
     }
 
+    /// A canvas inside a real scroll view, which zoom anchoring needs: it works
+    /// by moving the scroll origin, and there is nothing to move without one.
+    private func scrolled(_ image: CGImage,
+                          viewport: NSSize = NSSize(width: 800, height: 600))
+    -> (window: NSWindow, scroll: NSScrollView, canvas: EditorCanvasView) {
+        let view = EditorCanvasView(image: image, settings: settings())
+        let scroll = NSScrollView(frame: NSRect(origin: .zero, size: viewport))
+        // Scrollers OFF. They inset the clip view, so the viewport would not be
+        // the size this test says it is and every expectation below would be
+        // out by 15 points for a reason that has nothing to do with zoom.
+        scroll.hasVerticalScroller = false
+        scroll.hasHorizontalScroller = false
+        scroll.documentView = view
+
+        // A real window, even though nothing is shown. MEASURED: without one,
+        // `NSClipView.scroll(to:)` does nothing at all, so the test scrolled
+        // nowhere, the anchor was read at the wrong place, and the feature
+        // looked broken when it was the harness that was.
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: viewport),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = NSView(frame: NSRect(origin: .zero, size: viewport))
+        window.contentView?.addSubview(scroll)
+        window.layoutIfNeeded()
+        scroll.layoutSubtreeIfNeeded()
+        view.updateFrameForZoom()
+        return (window, scroll, view)
+    }
+
+    // MARK: - Zoom anchoring
+
+    func testZoomingHoldsThePointUnderTheFingersStill() throws {
+        // Big enough to scroll in both directions at both zooms, so the anchor
+        // is nowhere near an edge and the scroll origin is free to move.
+        let base = try solidWhite(2000, 1500)
+        let (window, scroll, view) = scrolled(base)
+        let clip = scroll.contentView
+        withExtendedLifetime(window) {}
+
+        view.setZoom(1)
+        clip.scroll(to: NSPoint(x: 500, y: 400))
+        scroll.reflectScrolledClipView(clip)
+
+        // A spot on SCREEN, given as an offset from the corner of the visible
+        // area. The view point sitting there changes whenever the scroll origin
+        // does, which is the whole reason this has to be recomputed each time
+        // rather than held in a variable.
+        let onScreen = NSPoint(x: 300, y: 220)
+        func viewPointOnScreen() -> CGPoint {
+            let o = clip.bounds.origin
+            return CGPoint(x: o.x + onScreen.x, y: o.y + onScreen.y)
+        }
+        let before = view.imagePosition(at: viewPointOnScreen())
+
+        for target in [CGFloat(2.0), 4.0, 0.5, 1.0] {
+            view.setZoom(target, holding: viewPointOnScreen())
+            let after = view.imagePosition(at: viewPointOnScreen())
+            XCTAssertEqual(after.x, before.x, accuracy: 1.0,
+                           "the picture slid sideways at \(target)x")
+            XCTAssertEqual(after.y, before.y, accuracy: 1.0,
+                           "the picture slid vertically at \(target)x")
+        }
+    }
+
+    func testZoomingWithNoAnchorLeavesTheScrollAlone() throws {
+        // Cmd+0 and the toolbar's fit button pass no anchor. Nothing should be
+        // scrolled behind the user's back in that case.
+        let base = try solidWhite(2000, 1500)
+        let (window, scroll, view) = scrolled(base)
+        withExtendedLifetime(window) {}
+        view.setZoom(2)
+        scroll.contentView.scroll(to: NSPoint(x: 100, y: 100))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        let origin = scroll.contentView.bounds.origin
+        view.setZoom(2.5)
+        XCTAssertEqual(scroll.contentView.bounds.origin.x, origin.x, accuracy: 0.001)
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, origin.y, accuracy: 0.001)
+    }
+
+    func testFitShowsTheWholeImageAndNeverMagnifies() throws {
+        let tall = try solidWhite(1000, 4000)
+        let (tallWindow, _, view) = scrolled(tall)
+        withExtendedLifetime(tallWindow) {}
+        view.zoomToFit()
+        XCTAssertEqual(Double(view.zoom), 600.0 / 4000.0, accuracy: 0.001)
+
+        // A capture smaller than the window stays at 100%.
+        let small = try solidWhite(40, 40)
+        let (smallWindow, _, tiny) = scrolled(small)
+        withExtendedLifetime(smallWindow) {}
+        tiny.zoomToFit()
+        XCTAssertEqual(tiny.zoom, 1, accuracy: 0.001)
+    }
+
     // MARK: - Flatten
 
     func testFlattenKeepsFullPixelResolution() throws {

@@ -156,13 +156,31 @@ final class EditorCanvasView: NSView, NSTextViewDelegate, NSDraggingSource {
         return CGRect(x: x, y: y, width: w, height: h)
     }
 
+    /// The image-space position under a view point, fractional and unclamped.
+    ///
+    /// Zoom anchoring needs this, and cannot use `imagePixel(from:)`: a pinch
+    /// centred on the grey margin beside the picture still has to hold the
+    /// picture still, and `imagePixel(from:)` deliberately clamps and rounds
+    /// because it feeds annotations. The pair below are expressed in terms of
+    /// this one, so there is still only one copy of the arithmetic.
+    func imagePosition(at p: CGPoint) -> CGPoint {
+        let r = imageRect
+        // The y flip: a view point measures up from the bottom, an image
+        // position measures down from the top edge of the image.
+        return CGPoint(x: (p.x - r.minX) / zoom, y: (r.maxY - p.y) / zoom)
+    }
+
+    /// The inverse of `imagePosition(at:)`.
+    func viewPoint(atImagePosition p: CGPoint) -> CGPoint {
+        let r = imageRect
+        return CGPoint(x: r.minX + p.x * zoom, y: r.maxY - p.y * zoom)
+    }
+
     /// View point (bottom-up points) to image pixel (top-left origin pixels).
     func imagePixel(from p: CGPoint) -> PixelPoint {
-        let r = imageRect
-        let px = (p.x - r.minX) / zoom
-        // The y flip: a view point measures up from the bottom, an image pixel
-        // measures down from the top edge of the image.
-        let py = (r.maxY - p.y) / zoom
+        let q = imagePosition(at: p)
+        let px = q.x
+        let py = q.y
         // CLAMPED to the image, and this is a bug fix rather than tidiness.
         //
         // The editor window is bigger than the image, so there is grey canvas
@@ -189,9 +207,7 @@ final class EditorCanvasView: NSView, NSTextViewDelegate, NSDraggingSource {
     /// Image pixel to view point. Returns the pixel's top-left corner, which is
     /// what makes the round trip through `imagePixel(from:)` exact.
     func viewPoint(from p: PixelPoint) -> CGPoint {
-        let r = imageRect
-        return CGPoint(x: r.minX + CGFloat(p.x) * zoom,
-                       y: r.maxY - CGFloat(p.y) * zoom)
+        viewPoint(atImagePosition: CGPoint(x: CGFloat(p.x), y: CGFloat(p.y)))
     }
 
     /// A pixel rectangle as a view rectangle. Built from the same pair above.
@@ -265,26 +281,123 @@ final class EditorCanvasView: NSView, NSTextViewDelegate, NSDraggingSource {
 
     // MARK: - Zoom
 
-    func setZoom(_ z: CGFloat) {
-        let clamped = min(8, max(0.1, z))
+    /// Change the zoom, optionally holding one point of the picture still.
+    ///
+    /// `holding` is a point in THIS view's coordinates. The image position
+    /// under it before the change is put back under it afterwards, by moving
+    /// the scroll origin. Without that, a pinch drags the picture out from
+    /// under your fingers and zooming past 2x becomes a hunt for the part you
+    /// were looking at.
+    ///
+    /// The limits and the arithmetic live in `SnaprCore.ZoomLevel`, so they can
+    /// be tested without opening a window. What stays here is the AppKit half:
+    /// which point to hold, and how to move the scroll view to hold it.
+    func setZoom(_ z: CGFloat, holding anchor: CGPoint? = nil) {
+        let clamped = CGFloat(ZoomLevel.clamp(Double(z)))
         guard clamped != zoom else { return }
         commitTextEditing()
+
+        // Read BEFORE anything moves: which part of the picture is being held,
+        // the point in this view that is holding it, and the scroll origin that
+        // both of those were measured against.
+        //
+        // The origin is not a detail. Resizing the document view lets AppKit
+        // CONSTRAIN the origin on its own, so by the time the anchor is applied
+        // the origin may already have moved. MEASURED, and the test that caught
+        // it is `testZoomingHoldsThePointUnderTheFingersStill`: zooming from 4x
+        // out to 0.5x put the anchor 5,400 pixels away from where it started,
+        // because the delta was being added to an origin that had already been
+        // clamped underneath it.
+        let held = anchor.map { (image: imagePosition(at: $0), at: $0,
+                                 origin: enclosingScrollView?.contentView.bounds.origin ?? .zero) }
+
         zoom = clamped
         updateFrameForZoom()
+        if let held { hold(imagePosition: held.image, at: held.at, measuredFrom: held.origin) }
         onZoomChanged?(zoom)
         needsDisplay = true
     }
 
-    func zoomIn() { setZoom(zoom * 1.25) }
-    func zoomOut() { setZoom(zoom / 1.25) }
+    /// Put an image position back under a point of this view, by scrolling.
+    ///
+    /// A note on the coordinate spaces, because the obvious way to write this
+    /// is wrong in a way that still compiles. The clip view scrolls by moving
+    /// its own `bounds.origin`, and the document view sits at the clip's
+    /// origin, so **clip coordinates and document coordinates are the same
+    /// numbers**. Converting between them with `convert(_:from:)` is an
+    /// identity and tells you nothing. What actually moves is the origin, so
+    /// that is what the arithmetic is written in.
+    ///
+    /// A view point P appears on screen at P minus the origin O. Holding it
+    /// still across a zoom means the new position of the same image content,
+    /// newP, must satisfy newP minus newO equals P minus O. So newO is
+    /// O plus newP minus P.
+    private func hold(imagePosition p: CGPoint, at wasAt: CGPoint,
+                      measuredFrom origin: CGPoint) {
+        guard let scroll = enclosingScrollView else { return }
+        let clip = scroll.contentView
+        let now = viewPoint(atImagePosition: p)
+        // `scroll(to:)` clamps to the scrollable area, so an anchor near an
+        // edge simply stops there rather than revealing empty space.
+        clip.scroll(to: NSPoint(x: origin.x + (now.x - wasAt.x),
+                                y: origin.y + (now.y - wasAt.y)))
+        scroll.reflectScrolledClipView(clip)
+    }
 
-    /// Cmd+0. Fits the whole image, and never magnifies past 100%, because a
-    /// small capture blown up to fill the window is not what "fit" means here.
-    func zoomToFit() {
-        guard let clip = enclosingScrollView?.contentView else { setZoom(1); return }
-        let sx = clip.bounds.width / CGFloat(image.width)
-        let sy = clip.bounds.height / CGFloat(image.height)
-        setZoom(min(1, min(sx, sy)))
+    /// The middle of what is on screen, which is what a button press or a
+    /// keyboard shortcut should zoom around. Zooming around the middle of the
+    /// whole document makes the view jump on every press.
+    private var centreOfVisible: CGPoint {
+        guard let clip = enclosingScrollView?.contentView else {
+            return CGPoint(x: bounds.midX, y: bounds.midY)
+        }
+        // `bounds` already carries the scroll offset in its origin, so its
+        // midpoint is the middle of the VISIBLE area, not of the document.
+        return CGPoint(x: clip.bounds.midX, y: clip.bounds.midY)
+    }
+
+    func zoomIn() { setZoom(CGFloat(ZoomLevel.stepIn(from: Double(zoom))), holding: centreOfVisible) }
+    func zoomOut() { setZoom(CGFloat(ZoomLevel.stepOut(from: Double(zoom))), holding: centreOfVisible) }
+
+    /// The zoom that shows the whole image. Never magnifies past 100%.
+    var fitZoom: CGFloat {
+        let clip = enclosingScrollView?.contentView
+        let size = clip?.bounds.size ?? bounds.size
+        return CGFloat(ZoomLevel.toFit(imageWidth: image.width, imageHeight: image.height,
+                                       viewportWidth: Double(size.width),
+                                       viewportHeight: Double(size.height)))
+    }
+
+    /// Cmd+0.
+    func zoomToFit() { setZoom(fitZoom) }
+
+    // MARK: - Zoom by hand
+    //
+    // A trackpad pinch, and a two-finger double tap. Both are handled here
+    // rather than by turning on `NSScrollView.allowsMagnification`, and that is
+    // deliberate: the scroll view magnifies by scaling a rendered layer, which
+    // would blur the picture and would leave the annotation coordinates
+    // disagreeing with what is on screen. This view already draws itself at
+    // `zoom` with nearest-neighbour sampling above 1x, so one image pixel stays
+    // a crisp square, which is the whole point of zooming into a screenshot.
+
+    override func magnify(with event: NSEvent) {
+        // A pinch is a zoom, so whatever was being typed is finished. Done once
+        // at the start rather than on every event of the gesture.
+        if event.phase == .began { commitTextEditing() }
+        guard event.magnification != 0 else { return }
+        let at = convert(event.locationInWindow, from: nil)
+        setZoom(CGFloat(ZoomLevel.pinched(from: Double(zoom),
+                                          by: Double(event.magnification))),
+                holding: at)
+    }
+
+    /// Two-finger double tap. Toggles between the whole image and its real
+    /// pixels, anchored where the tap was.
+    override func smartMagnify(with event: NSEvent) {
+        let at = convert(event.locationInWindow, from: nil)
+        let target = ZoomLevel.smartTarget(current: Double(zoom), fit: Double(fitZoom))
+        setZoom(CGFloat(target), holding: at)
     }
 
     /// The document view must be at least as large as the visible area, so the
