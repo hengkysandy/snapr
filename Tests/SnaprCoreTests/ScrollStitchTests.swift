@@ -460,3 +460,108 @@ struct ScrollStitchTests {
         }
     }
 }
+
+/// The page that a real text editor actually shows.
+///
+/// MEASURED on a live automatic scrolling capture of TextEdit, from the app's
+/// own log:
+///
+///     refused frame, bestDY=520  best=0   second=282 median=36295
+///     refused frame, bestDY=1040 best=0   second=324 median=36275
+///     refused frame, bestDY=1040 best=319 second=329 median=36245
+///
+/// The first two are EXACT matches, scoring a perfect zero, and both were
+/// refused. The third really is ambiguous and was refused correctly.
+///
+/// `documentPage` never caught this because it writes a line number across the
+/// whole left quarter, so two neighbouring lines look very different. A real
+/// document is the opposite: "line 0041 the quick brown fox..." differs from
+/// the line below it by two digits in seventy characters, so the runner-up
+/// offset scores almost as well as the truth and the winner's margin is thin in
+/// absolute terms while being decisive in kind.
+@Suite("Scroll stitch, near-identical lines")
+struct ScrollStitchNarrowMarginTests {
+
+    /// Lines that are identical except for a short counter at the left margin.
+    static func editorPage(width: Int, height: Int,
+                           lineHeight: Int = 26, inkRows: Int = 15) -> PixelBuffer {
+        var rgba = [UInt8](repeating: 20, count: width * height * 4)
+        for i in stride(from: 3, to: rgba.count, by: 4) { rgba[i] = 255 }
+        // Narrow on purpose. This is the only thing that separates one line
+        // from the next, exactly as a line number is.
+        let counterWidth = 34
+
+        for y in 0..<height {
+            let line = y / lineHeight
+            let within = y % lineHeight
+            guard within < inkRows else { continue }
+            for x in 0..<width {
+                let i = (y * width + x) * 4
+                let ink: Bool
+                if x < counterWidth {
+                    ink = ((line >> ((x / 4) % 8)) & 1) == 1 && within % 4 != 0
+                } else {
+                    // Byte for byte the same sentence on every single line.
+                    ink = (x &* 7 &+ within &* 13) % 11 < 4
+                }
+                let v: UInt8 = ink ? 235 : 20
+                rgba[i] = v; rgba[i + 1] = v; rgba[i + 2] = v
+            }
+        }
+        return PixelBuffer(width: width, height: height, rgba: rgba)
+    }
+
+    @Test("an exact match on a page of near-identical lines is accepted")
+    func exactMatchIsAccepted() {
+        let page = Self.editorPage(width: 720, height: 3000)
+        let h = 780
+        let previous = ScrollStitchTests.viewport(page, at: 0, height: h)
+
+        // Whole multiples of the line height, which is what a real scroll of a
+        // text view lands on and what produced the measured numbers. 520 is the
+        // largest offset the stitcher will look for at this frame height, since
+        // it insists on a third of the frame in common.
+        for dy in [130, 260, 520] {
+            let current = ScrollStitchTests.viewport(page, at: dy, height: h)
+            let step = ScrollStitch.offset(from: previous, to: current)
+            let d = ScrollStitch.lastDiagnosis
+            #expect(step == .scrolled(dy),
+                    """
+                    dy=\(dy) got \(step). \
+                    best=\(d?.best ?? -1) second=\(d?.second ?? -1) \
+                    median=\(d?.median ?? -1) bestDY=\(d?.bestDY ?? -1)
+                    """)
+        }
+    }
+
+    @Test("a run of such a page is rebuilt with no line lost")
+    func aRunIsRebuilt() {
+        let page = Self.editorPage(width: 720, height: 4000)
+        // A third of the frame, which is what the app aims for. 520 was tried
+        // and it is the cliff edge: at two thirds of the frame the overlap is
+        // down to the ten lines the stitcher insists on, one frame is refused,
+        // and from then on every frame is two steps away and out of range for
+        // good. That is a fact about the algorithm, not a bug, and it is why
+        // the automatic scroll step is set well below the limit.
+        let h = 780, step = 260
+        var stitcher = ScrollStitcher(first: ScrollStitchTests.viewport(page, at: 0, height: h))
+        var y = 0
+        while y + step + h <= page.height {
+            y += step
+            stitcher.add(ScrollStitchTests.viewport(page, at: y, height: h))
+        }
+        let out = stitcher.finish()
+        #expect(out.height == y + h, "expected \(y + h) rows, got \(out.height)")
+
+        // Every row of the result must be the row of the page it came from.
+        var wrong = 0
+        for row in 0..<out.height {
+            for x in stride(from: 0, to: out.width, by: 37) {
+                if out.rgba[(row * out.width + x) * 4] != page.rgba[(row * page.width + x) * 4] {
+                    wrong += 1; break
+                }
+            }
+        }
+        #expect(wrong == 0, "\(wrong) of \(out.height) rows came from the wrong place")
+    }
+}

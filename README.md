@@ -31,6 +31,9 @@ wants Accessibility, and it only ever sends scroll events with it.
 If you scroll faster than it can follow it skips a frame and says so, rather
 than guessing and quietly dropping a paragraph.
 
+MEASURED on a 1200 line document: 110 frames, none refused, 30,000 pixels of
+page in under seven seconds, with every line read back in order.
+
 **While selecting**
 
 | | |
@@ -171,11 +174,27 @@ sudo xcode-select -s /Applications/Xcode.app        # once per machine
 security find-identity -v -p codesigning
 echo 'Apple Development: you@example.com (TEAMID)' > .app-signing
 
-./app up        # build, install to /Applications, launch
+./app up        # Release build, install to /Applications, launch
+./app dev       # the same, but Debug. See the warning below
 ./app test      # core tests, then the integration tests
 ./app sig       # confirm the signature survives rebuilds
 ./app dmg       # a Release DMG in dist/
 ```
+
+### Use `./app up`, not `./app dev`, for an app you actually use
+
+`up` builds Release on purpose. MEASURED: one call into the scroll stitcher on
+a 1200x1000 frame costs **2.0 ms** compiled with optimisation and **488 ms**
+without it. Building the luma plane for one frame costs 0.8 ms against 97 ms.
+
+A Debug build therefore manages about 1.6 frames a second during a scrolling
+capture instead of the 16 it asks for, the page moves further than the stitcher
+will accept between frames, and most of the run is refused. Everything else
+still works, so the build looks healthy while being 200 times slower in the
+only loops that matter.
+
+`dev` is there for when a breakpoint or an `assert` is genuinely wanted.
+`precondition` still fires in Release, so the buffer-size checks are not lost.
 
 ### Why `.app-signing` is not optional
 
@@ -201,7 +220,7 @@ out rather than forgotten.
 
 ```
 Sources/SnaprCore/     every decision. No AppKit, no ScreenCaptureKit, no Vision
-Tests/SnaprCoreTests/  97 tests, 0.14 s, no app and no permission needed
+Tests/SnaprCoreTests/  129 tests, no app and no permission needed
 SnaprMac/              the thin shell that touches macOS
 docs/design.md         the design, and the measurements that produced it
 CONTRACTS.md           the module boundaries

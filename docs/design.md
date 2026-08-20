@@ -581,9 +581,32 @@ a permission they have not reached for, because a dialogue on first run for a
 feature nobody wanted is how people learn to dismiss dialogues.
 
 Automatic scrolling can do one thing a hand cannot be asked about: it knows when
-it has reached the bottom, because it scrolled and the page did not move. Three
-unchanged frames in a row end the run. Three, not one, because a single
-unchanged frame usually means the app has not finished redrawing.
+it has reached the bottom, because it scrolled and the page did not move.
+
+**The threshold is a duration, not a count of frames.** MEASURED, and this is
+why: it used to be three unchanged frames, and raising the capture rate from 8 a
+second to 16 silently halved how long the app waited. A real run then ended
+after 280 ms and four frames, three of them unchanged, and reported that it had
+reached the end of a page that had simply not started moving yet. Anything tuned
+in frames is retuned by the frame rate. Six hundred milliseconds is six hundred
+milliseconds.
+
+Three separate things end an automatic run, and they say different things
+because they have different fixes:
+
+| | |
+|---|---|
+| Nothing moved for 0.6 s, after the page HAS moved at least once | the end of the page |
+| Nothing moved for 2.5 s and the page never moved at all | nothing under the pointer scrolls |
+| Nothing was ADDED for 3 s, although the page keeps moving | the page is running faster than the stitcher can follow |
+
+The last one is not a nicety. A page scrolled faster than the stitcher accepts
+moves on every frame, so it never looks still and the end-of-page test never
+fires, while no frame is ever accepted so the image never grows. Without it that
+run never stops on its own.
+
+A refused frame counts as MOVEMENT, not stillness. That is exactly what it is:
+the page moved further than could be followed.
 
 The app cannot hold the keyboard during a run either way, because the window
 being scrolled needs it, so there is no Escape and no Return. The run ends by
@@ -622,15 +645,41 @@ Scoring the whole overlap makes a wrong offset disagree on every line of the
 frame instead of agreeing on one unlucky gap. MEASURED on the repetitive
 fixture: the true offset scores 0, the nearest rival 572.
 
-### Two gates, and the reason for each
+### One gate, after a second one was measured to be wrong
 
+- **Flat page.** If every offset scores the same there is nothing to choose
+  between them and the frame is refused.
 - **Ratio.** The runner-up must be at least three times worse. The truth
   normally scores exactly zero, because a scrolled view blits its pixels rather
   than redrawing them.
-- **Spread.** The gap must also be large next to the spread of all the scores.
-  On a page of one flat colour every offset scores about the same, the median
-  collapses onto the winner, and a gap of one unit would otherwise look like a
-  decisive win.
+
+There used to be a third: the winner's margin also had to exceed a hundredth of
+the spread of all the scores. MEASURED on a live automatic capture of TextEdit,
+from the app's own log:
+
+```
+refused frame, bestDY=520   best=0   second=282  median=36295
+refused frame, bestDY=1040  best=0   second=324  median=36275
+refused frame, bestDY=319   best=319 second=329  median=36245
+```
+
+The first two are **exact** matches, scoring a perfect zero, and both were
+thrown away because 282 is less than a hundredth of 36295. The third really is
+ambiguous and the ratio refused it correctly.
+
+The spread test asked the runner-up to be far from the winner in ABSOLUTE terms.
+On a real document that is the wrong question. "line 0041 the quick brown fox"
+differs from the line below it by two digits in seventy characters, so a good
+runner-up is the normal case and says nothing about whether the winner is right.
+The ratio already refuses the flat page the spread test was written for, because
+there best, second and median all collapse together.
+
+The fixture that caught this is `ScrollStitchNarrowMarginTests.editorPage`:
+lines that are identical except for a short counter at the left margin. It
+reproduces the measured numbers (best 0, second 181, median 27056). The older
+`documentPage` fixture missed it because it writes a line number across the
+whole left quarter, so two neighbouring lines look very different from each
+other, which a real document never does.
 
 "Nothing moved" is checked first and on its own terms, because a hand scrolls in
 bursts and pauses in between, and putting every pause through the ambiguity test
@@ -644,10 +693,68 @@ the floor: a frame had TWO exact matches, the true offset and a two-line sliver
 elsewhere, so a frame it should have been sure about was refused.
 
 A third of the frame caps the scroll that can be followed at two thirds of the
-region per frame, about 5800 pixels a second. Past that the frame is refused,
+region per frame. Past that the frame is refused,
 and **being refused is safe**: the next frame is measured against the last GOOD
 frame, so nothing is lost. A wrong match is not safe, so the floor is set for
 that rather than for speed.
+
+### Frame rate, and the cost of a frame
+
+MEASURED on this machine, per frame of a scrolling capture:
+
+| | |
+|---|---|
+| `SCShareableContent.excludingDesktopWindows` | 7.4 ms |
+| `SCScreenshotManager.captureImage` | 17.8 ms |
+| Build the luma plane for the cropped region | 0.8 ms |
+| Find the offset | 2.0 ms |
+
+The enumeration was being done on every single frame to answer a question whose
+answer cannot change during a run: which display this is, and which windows are
+ours. It is now worked out once per run, as `CaptureEngine.FrameSource`. A
+one-shot capture still enumerates, because there the 7.4 ms is paid once and a
+stale window list would be a real bug.
+
+That leaves about 20 ms per frame, so the interval went from 0.12 s to 0.06 s.
+This is not about smoothness. **Halving the interval halves how far the content
+can travel between two frames**, which is the whole reason a fast manual scroll
+gets refused. A `busy` guard makes the rate an upper bound rather than a
+promise: on a slower machine, ticks are skipped instead of queueing stale
+frames.
+
+MEASURED end to end afterwards, on a 1200 line document in TextEdit:
+
+| | before | after |
+|---|---|---|
+| Automatic, 1441 px region | 2 frames, 11 refused, 16 rebased | **110 frames, 0 refused, 0 rebased** |
+| Manual, ten page-downs | not measured | **44 frames, 0 refused, 0 rebased** |
+
+The result was read back with Vision and checked visually at the head, the
+middle and the tail: 30,161 pixels, every line present once and in order.
+
+### The automatic scroll step is a sixth of the region, not a third
+
+MEASURED with a third, on a 1561 pixel region, which is a 520 pixel step:
+
+```
+refused frame, bestDY=520   ...
+refused frame, bestDY=1040  ...
+refused frame, bestDY=1040  ...
+```
+
+The page travelled 1040 pixels in one frame from a 520 pixel step, because a
+text view animates a scroll over about 150 ms and at 16 frames a second two or
+three impulses are in flight at once. 1040 is exactly two thirds of the region,
+which is the most the stitcher will accept, so every frame sat on the cliff
+edge.
+
+A sixth leaves the doubled-up case at a third of the region. It costs speed and
+nothing else: this still scrolls about 2000 points a second.
+
+The unit test learned the same lesson independently. A run fixture stepping by
+two thirds of the frame stalls partway through, because at that step the overlap
+is down to the ten lines the stitcher insists on, one frame is refused, and from
+then on every frame is two steps away and permanently out of range.
 
 ### Sticky bands
 
@@ -764,6 +871,37 @@ LaunchServices**, and because `open` detaches stdout, any diagnostic has to land
 in a file.
 
 ---
+
+## 9.1 `./app up` installs a Release build, and that is not a detail
+
+MEASURED with `swift test` on the same 1200x1000 frame, Debug against Release:
+
+| | Debug (`-Onone`) | Release (`-O`) | |
+|---|---|---|---|
+| `ScrollStitch.offset` | 488 ms | 2.0 ms | 240x |
+| `PixelBuffer.init` (luma plane) | 97 ms | 0.8 ms | 120x |
+| `ScrollStitch.describe` | 75 ms | 0.4 ms | 190x |
+
+`./app up` used to install a Debug build, so that is what had been running. One
+scrolling-capture frame costs about 610 ms there against about 20 ms in
+Release, which is 1.6 frames a second instead of 16. The page then moves further
+between two frames than the stitcher will accept and most of the run is refused.
+
+Nothing looks broken. The app launches, captures, annotates and searches. Only
+the pixel loops are two hundred times slower, and they are the ones nobody
+watches with a stopwatch.
+
+`@_optimize(speed)` on the hot functions was tried first and measured to make no
+difference at all under `swift test` in Debug, so it was reverted rather than
+left in as decoration.
+
+`./app dev` still builds Debug, for when a breakpoint or an `assert` is genuinely
+wanted. `precondition` fires in Release, so the buffer-size checks are not lost.
+
+The signing requirement is identity-based rather than hash-based, so switching
+configuration does **not** drop the Screen Recording grant. Checked with
+`./app sig` after the change, and again by watching a Release build capture on
+the first try.
 
 ## 10. Shipping
 

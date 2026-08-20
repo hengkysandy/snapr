@@ -219,21 +219,33 @@ public enum ScrollStitch {
         lastDiagnosis = Diagnosis(best: best, bestDY: bestDY, second: second,
                                   median: median, verified: false)
 
-        // Two conditions, and both are needed.
-        //
-        // The RATIO is what actually separates a real match from a rival: the
-        // truth usually scores zero, because a scrolled view blits its pixels
-        // rather than redrawing them, while the nearest wrong offset on a page
-        // of text still disagrees on every line number. MEASURED on the
-        // repetitive fixture: 0 against 572.
-        //
-        // The SPREAD stops that ratio being read into noise. On a page of one
-        // flat colour every offset scores about the same, so the median
-        // collapses onto the winner and a gap of one unit would otherwise look
-        // like a decisive win.
+        // A flat page first. If every offset scores the same there is nothing
+        // to choose between them, and the winner is whichever one happened to
+        // be first.
         guard spread > 0 else { return .lost }
+
+        // Then the RATIO, and only the ratio. The truth usually scores zero,
+        // because a scrolled view blits its pixels rather than redrawing them,
+        // while the nearest wrong offset still disagrees on every line number.
+        //
+        // There used to be a second condition here, that the winner's margin
+        // also had to exceed a hundredth of the spread. MEASURED on a live
+        // automatic capture of TextEdit, and it was wrong:
+        //
+        //     bestDY=520  best=0 second=282 median=36295   REFUSED
+        //     bestDY=1040 best=0 second=324 median=36275   REFUSED
+        //
+        // Both are exact matches, and both were thrown away because 282 is less
+        // than a hundredth of 36295. That test asked the runner-up to be far
+        // from the winner in ABSOLUTE terms, but on a real document the line
+        // below is nearly the same as the line above, so a good runner-up is
+        // the normal case and says nothing about whether the winner is right.
+        // The ratio already refuses the flat page it was meant to catch, since
+        // there best, second and median all collapse together. See
+        // `ScrollStitchNarrowMarginTests`, whose fixture reproduces these
+        // numbers.
         if second != Int.max {
-            guard second > best * 3, second - best > spread / 100 else { return .lost }
+            guard second > best * 3 else { return .lost }
         }
 
         let ok = verify(previous, current, dy: bestDY,

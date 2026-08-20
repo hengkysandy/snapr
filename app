@@ -48,7 +48,8 @@ usage() {
   cat <<'EOF'
 ./app <command>
 
-  up        generate, build Debug, install to /Applications, launch
+  up        generate, build Release, install to /Applications, launch
+  dev       the same, but Debug. Slower by 200x in the pixel loops
   build     generate and build Debug, do not install
   test      core tests (fast, no app) then the Mac integration tests
   dmg       Release build, staged as a drag installer, into dist/
@@ -70,9 +71,28 @@ case "${1:-}" in
     xcodebuild "${BUILD_FLAGS[@]}" -configuration Debug "${SIGNING[@]}" build
     ;;
 
-  up)
+  up|dev)
+    # Release for `up`, Debug for `dev`.
+    #
+    # MEASURED, and this is not a small difference. The same scroll-stitch call
+    # on a 1200x1000 frame takes 2.0 ms compiled with -O and 488 ms compiled
+    # -Onone, which is 240x. Building the luma plane for one frame is 0.8 ms
+    # against 97 ms. A scrolling capture in a Debug build therefore manages
+    # about 1.6 frames a second instead of the 8 it asks for, the page moves
+    # further than the stitcher will accept between frames, and the run refuses
+    # almost everything. `up` used to install Debug, so that is what has been
+    # running.
+    #
+    # `dev` keeps the Debug build for when a breakpoint or an `assert` is
+    # actually wanted. `precondition` still fires in Release, so the buffer-size
+    # checks that matter are not lost.
+    # An `if`, not `[ ... ] && ...`. Under `set -e` a failed test as the last
+    # command of a line exits the script, so `./app up` would have stopped here
+    # silently doing nothing.
+    CONFIG=Release
+    if [ "$1" = "dev" ]; then CONFIG=Debug; fi
     xcodegen generate
-    xcodebuild "${BUILD_FLAGS[@]}" -configuration Debug "${SIGNING[@]}" build
+    xcodebuild "${BUILD_FLAGS[@]}" -configuration "$CONFIG" "${SIGNING[@]}" build
     pkill -f "$PRODUCT.app" 2>/dev/null || true
     sleep 0.3
     rm -rf "$INSTALLED"
@@ -80,13 +100,13 @@ case "${1:-}" in
     # MEASURED on the probe: Finder does not show a dot-directory in the
     # permission picker, and a clean build deletes the path, which silently
     # invalidates the TCC grant.
-    cp -R "$DERIVED/Build/Products/Debug/$APP_NAME.app" "$INSTALLED"
+    cp -R "$DERIVED/Build/Products/$CONFIG/$APP_NAME.app" "$INSTALLED"
     # `open`, never the binary directly. MEASURED: running the binary from a
     # terminal makes TCC attribute every permission check to the RESPONSIBLE
     # PROCESS, which is the terminal. A brand new app with nothing granted
     # reported that it held both grants.
     open "$INSTALLED"
-    echo "installed and launched $INSTALLED"
+    echo "installed and launched $INSTALLED ($CONFIG)"
     ;;
 
   test)

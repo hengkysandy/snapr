@@ -142,6 +142,62 @@ final class CaptureEngine {
         try await grabScreen(screen, showsCursor: false)
     }
 
+    /// Everything a repeated capture of the same screen needs, worked out once.
+    ///
+    /// MEASURED on this machine: `SCShareableContent.excludingDesktopWindows`
+    /// costs a 7.4 ms median and `SCScreenshotManager.captureImage` costs 17.8
+    /// ms. Enumerating on every frame of a scroll run therefore spent about a
+    /// quarter of the frame budget re-answering a question whose answer cannot
+    /// change during the run: which display this is, and which windows are
+    /// ours.
+    ///
+    /// The window list is a snapshot on purpose. A scroll run lasts a few
+    /// seconds with our own panel on screen the whole time, and re-reading it
+    /// per frame to catch a window that will not appear is the trade that was
+    /// costing the frame rate.
+    ///
+    /// Only for a run of frames. A one-shot capture still enumerates, because
+    /// there the 7.4 ms is paid once and a stale window list would be a real
+    /// bug.
+    struct FrameSource {
+        let filter: SCContentFilter
+        let config: SCStreamConfiguration
+    }
+
+    func frameSource(for screen: NSScreen) async throws -> FrameSource {
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.excludingDesktopWindows(
+                false, onScreenWindowsOnly: true)
+        } catch {
+            throw Self.classify(error)
+        }
+        guard let display = Self.match(screen, in: content.displays) ?? content.displays.first else {
+            throw CaptureError.noDisplay
+        }
+        let scale = Int(screen.backingScaleFactor.rounded())
+        return FrameSource(
+            filter: SCContentFilter(display: display,
+                                    excludingWindows: Self.ownWindows(in: content)),
+            config: Self.configuration(pixelWidth: display.width * scale,
+                                       pixelHeight: display.height * scale,
+                                       showsCursor: false))
+    }
+
+    func captureFrame(using source: FrameSource) async throws -> CGImage {
+        let image: CGImage
+        do {
+            image = try await SCScreenshotManager.captureImage(
+                contentFilter: source.filter, configuration: source.config)
+        } catch {
+            throw Self.classify(error)
+        }
+        if let reason = Self.blankFrameReason(image) {
+            throw CaptureError.blankFrame(reason)
+        }
+        return image
+    }
+
     private func grabScreen(_ screen: NSScreen, showsCursor: Bool) async throws -> CGImage {
         // ONE enumeration, used for both the display and our own windows.
         // Fetching it twice doubled the slowest part of a capture, and this

@@ -363,10 +363,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // A scrolling capture is a screenshot like any other, so it goes
                 // into the library and opens in the editor.
                 self.finish(image: image, kind: .area)
-            case .nothing:
+            case .nothing(let hint):
                 Toast.shared.show(Toast.Content(
                     title: "Nothing to stitch",
-                    detail: "Scroll the window while the capture is running",
+                    detail: hint,
                     symbol: "arrow.down.doc",
                     tint: .systemOrange))
             case .failed(let error):
