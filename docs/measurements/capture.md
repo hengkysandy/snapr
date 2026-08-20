@@ -26,7 +26,7 @@ The designated requirement produced by the free Apple Development certificate:
 ```
 designated => identifier "com.hengkysandy.snapr.probe"
               and anchor apple generic
-              and certificate leaf[subject.CN] = "Apple Development: ... (G4VC8JL3UR)"
+              and certificate leaf[subject.CN] = "Apple Development: ... (CERTID)"
               and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */
 ```
 

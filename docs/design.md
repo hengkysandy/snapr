@@ -73,7 +73,7 @@ FTS5 sanitizer has to survive 29 hostile inputs, and none of them need a screen.
 | Bundle identifier | `com.hengkysandy.snapr.mac` | **Destructive.** Every TCC grant is keyed to it. Screen Recording drops on every machine |
 | Keychain service | `com.hengkysandy.snapr.dbkey` | **Destructive.** The app finds no key, generates a fresh one, and the whole encrypted library becomes permanently unreadable |
 | Support directory | `~/Library/Application Support/Snapr` | **Destructive.** Orphans the history and every blob |
-| Repo | `hengkysandy/snapr`, private | Cheap |
+| Repo | `hengkysandy/snapr`, public | Cheap |
 | Apple account | **Free** | No CloudKit, no notarisation. The DMG needs Open Anyway |
 | Sandbox | **Off** | A free account cannot ship to the App Store, so the sandbox costs a security-scoped bookmark per folder and buys nothing |
 

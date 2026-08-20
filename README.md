@@ -223,6 +223,26 @@ falling back quietly.
 A free Apple ID is enough for this. You do not need the paid membership to build
 and run Snapr, only to notarise it for other people.
 
+## Status: frozen at 0.1.0
+
+Feature work stopped on 21 August 2026, on purpose and while everything was
+green. It captures, annotates, searches and stitches, with 138 core tests and
+119 integration tests passing.
+
+It is **not** a replacement for a shipped product, and it is worth being plain
+about why. It has been used on one Mac, one display, in a handful of
+applications. Multi-display is written but has never been run against a second
+display, and the failure mode there is capturing the wrong region. It cannot be
+notarised on a free Apple account, so on any Mac that did not build it,
+Gatekeeper blocks the first launch. Neither of those is a coding problem.
+
+If you want a screenshot tool rather than a screenshot tool project, buy
+[Shottr](https://shottr.cc/). This repository is here because the way it was
+built is worth reading: every decision in `docs/design.md` carries the
+measurement that caused it, including a good number that contradicted the
+obvious choice and several that were only found by testing the real app rather
+than the tests.
+
 ## What it deliberately does not do
 
 No content-aware erase, no video or GIF recording, no
